@@ -1,0 +1,20 @@
+menu "HT16K33A Configuration"
+
+    config HT16K33A_I2C_NUM
+        int "The I2C port to use to talk to a HT16K33A 14-digit display driver"
+        default 0
+        range -1 1
+
+    config HT16K33A_I2C_SCL_PIN
+        int "HT16K33A I2C clock GPIO"
+        default 4
+
+    config HT16K33A_I2C_SDA_PIN
+        int "TMC5160 I2C SDA GPIO"
+        default 43
+
+    config HT16K33A_I2C_CLOCK_HZ
+        int "HT16K33A I2C clock frequency (Hz)"
+        default 100000
+
+endmenu

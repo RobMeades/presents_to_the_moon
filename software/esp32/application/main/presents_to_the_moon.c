@@ -40,6 +40,7 @@
 #include "esp_task_wdt.h"
 #include "esp_random.h"
 #include "esp_bt.h"
+#include "ht16k33a.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
@@ -71,10 +72,10 @@
 // breaking change to the BLE characteristic handling.
 #define BLE_INTERFACE_VERSION 0
 
-// UART buffer.
-#define UART_RX_BUFFFER_SIZE 256
+// Base I2C address of a HT16K33A display driver.
+#define HT16K33A_I2C_BASE_ADDRESS 0x70
 
-// The diameter of the winch in millimetres
+// The diameter of the winch in millimetres.
 #define WINCH_DIAMETER_MM 100
 
 // TMC5160 stepper motor controller address.
@@ -375,6 +376,7 @@ typedef struct {
     SemaphoreHandle_t lock;
     QueueHandle_t command_queue;
     TaskHandle_t command_task;
+    display_t *display;
     ble_uuid16_t service_uuid;
     struct ble_hs_adv_fields ble_adv_fields;
     uint16_t ble_connection_handle;
@@ -434,6 +436,9 @@ static context_t g_context = {.service_uuid = BLE_UUID16_INIT(SERVICE_UUID),
 
 // Retained RAM storage
 FGR_RRAM_DEFINE(retained_ram_t, retained_ram);
+
+// The I2C addresses of the countdown display.
+static const uint8_t g_ht16k33a_i2c_address_list[] = {HT16K33A_I2C_BASE_ADDRESS};
 
 // The names of the launcher states for debug prints;
 // entries are in the same order as launcher_state_t
@@ -3341,6 +3346,23 @@ static int32_t init(context_t *context)
         // Make sure that NVS is populated (in case it is blank)
         if (err == ESP_OK) {
             nvs_populate(nvs_shadow);
+        }
+
+        // Initialise the HT16K33A countdown display
+        if (err == ESP_OK) {
+            err = ht16k33a_init(CONFIG_HT16K33A_I2C_NUM, CONFIG_HT16K33A_I2C_SDA_PIN,
+                                CONFIG_HT16K33A_I2C_SCL_PIN, CONFIG_HT16K33A_I2C_CLOCK_HZ);
+            if (err == ESP_OK) {
+                err = -ESP_ERR_NO_MEM;
+                context->display = ht16k33a_create(g_ht16k33a_i2c_address_list,
+                                                   FGR_UTIL_ARRAY_LENGTH(g_ht16k33a_i2c_address_list));
+                if (context->display) {
+                    ht16k33a_set_scroll_mode(context->display, HT16K33A_SCROLL_LEFT);
+                    ht16k33a_set_scroll_rate(context->display, 0);
+                    ht16k33a_set_scroll_end(context->display, HT16K33A_SCROLL_BOUNCE);
+                    err = ht16k33a_set_text(context->display, "Rubber baby buggy bumpers");
+                }
+            }
         }
 
         if (err == ESP_OK) {
