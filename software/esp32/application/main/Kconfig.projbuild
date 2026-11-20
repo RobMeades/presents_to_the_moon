@@ -1,0 +1,27 @@
+menu "Application Configuration"
+
+    config PRESENTS_TO_THE_MOON_AUDIO_PIN_0
+        int "Audio pin 0"
+        default 44
+        help
+            GPIO pin wired to pin IO0 of the DY-HV8F audio board.
+
+    config PRESENTS_TO_THE_MOON_AUDIO_PIN_1
+        int "Audio pin 1"
+        default 2
+        help
+            GPIO pin wired to pin IO1 of the DY-HV8F audio board.
+
+    config PRESENTS_TO_THE_MOON_AUDIO_PIN_2
+        int "Audio pin 2"
+        default 5
+        help
+            GPIO pin wired to pin IO2 of the DY-HV8F audio board.
+
+    config PRESENTS_TO_THE_MOON_AUDIO_PIN_3
+        int "Audio pin 3"
+        default -1
+        help
+            GPIO pin wired to pin IO3 of the DY-HV8F audio board.
+
+endmenu
