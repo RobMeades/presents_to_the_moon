@@ -58,6 +58,8 @@
 #include "fgr_nvs.h"
 #include "fgr_task.h"
 #include "fgr_rram.h"
+#include "fgr_network.h"
+#include "fgr_time.h"
 
 #include "tmc5160.h"
 
@@ -74,6 +76,9 @@
 
 // Base I2C address of a HT16K33A display driver.
 #define HT16K33A_I2C_BASE_ADDRESS 0x70
+
+// How many seconds to wait for time synchronisation
+#define TIME_SYNC_WAIT_SECONDS 30
 
 // The diameter of the winch in millimetres.
 #define WINCH_DIAMETER_MM 100
@@ -3136,14 +3141,25 @@ static int32_t init(context_t *context)
     launcher_motor_t *motor = &launcher->motor;
     nvs_shadow_t *nvs_shadow = &launcher->nvs_shadow;
 
+    // Print out our Wi-Fi MAC address
+    fgr_debug_print_mac_address();
+
     // Allow us to feed the watchdog
     esp_task_wdt_add(NULL);
 
+    // Create the default event loop, for everyone's use
+    int32_t err = esp_event_loop_create_default();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create default event loop: %s.", esp_err_to_name(err));
+    }
+
     // Create mutex to guard the context
-    int32_t err = -ESP_ERR_NO_MEM;
-    context->lock = xSemaphoreCreateMutex();
-    if (context->lock) {
-        err = ESP_OK;
+    if (err == ESP_OK) {
+        err = -ESP_ERR_NO_MEM;
+        context->lock = xSemaphoreCreateMutex();
+        if (context->lock) {
+            err = ESP_OK;
+        }
     }
 
     if (err == ESP_OK) {
@@ -3312,20 +3328,20 @@ static int32_t init(context_t *context)
 
     // Set the pins that control the audio track all high so that they can be pulled low
 #if defined(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_0) && (CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_0 >= 0)
-    gpio_set_level(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_0, 1);
-    gpio_set_direction(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_0, GPIO_MODE_OUTPUT);
+        gpio_set_level(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_0, 1);
+        gpio_set_direction(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_0, GPIO_MODE_OUTPUT);
 #endif
 #if defined(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_1) && (CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_1 >= 0)
-    gpio_set_level(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_1, 1);
-    gpio_set_direction(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_1, GPIO_MODE_OUTPUT);
+        gpio_set_level(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_1, 1);
+        gpio_set_direction(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_1, GPIO_MODE_OUTPUT);
 #endif
 #if defined(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_2) && (CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_2 >= 0)
-    gpio_set_level(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_2, 1);
-    gpio_set_direction(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_2, GPIO_MODE_OUTPUT);
+        gpio_set_level(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_2, 1);
+        gpio_set_direction(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_2, GPIO_MODE_OUTPUT);
 #endif
 #if defined(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_3) && (CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_3 >= 0)
-    gpio_set_level(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_3, 1);
-    gpio_set_direction(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_3, GPIO_MODE_OUTPUT);
+        gpio_set_level(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_3, 1);
+        gpio_set_direction(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_3, GPIO_MODE_OUTPUT);
 #endif
 
         // Configure WS2812 LED operations needed for debug, FGR style
@@ -3363,6 +3379,38 @@ static int32_t init(context_t *context)
                 }
             }
         }
+
+        // Bring up Wifi, only to establish time
+        if (err == ESP_OK) {
+            err = fgr_network_init(CONFIG_FGR_NETWORK_WIFI_SSID,
+                                   CONFIG_FGR_NETWORK_WIFI_PASSWORD,
+                                   WIFI_AUTH_OPEN,
+                                   CONFIG_FGR_NETWORK_WIFI_REDUCED_TX_POWER);
+        }
+
+        // Establish absolute time
+        if (err == ESP_OK) {
+            err = fgr_time_init(FGR_TIME_NTP_SERVER_IP_ADDRESS,
+                                FGR_TIME_TIMEZONE_LONDON,
+                                FGR_TIME_NTP_SYNC_INTERVAL_SECONDS);
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "waiting up to %d second(s) for time sync...", TIME_SYNC_WAIT_SECONDS);
+                launcher_timer_t timer;
+                timer_start_us(&timer, ((int64_t) TIME_SYNC_WAIT_SECONDS) * 1000000);
+                do {
+                    err = fgr_time_sync_wait(1);
+                } while ((err < 0) && !timer_has_expired(&timer));
+                if (err >= 0) {
+                    err = ESP_OK;
+                } else {
+                    ESP_LOGE(TAG, "unable to establish time!");
+                }
+            }
+        }
+
+        // Take down the time service and Wifi again
+        fgr_time_deinit();
+        fgr_network_deinit();
 
         if (err == ESP_OK) {
             err = -ESP_ERR_NO_MEM;
@@ -3500,6 +3548,7 @@ void app_main(void)
     }
     vTaskDelay(pdMS_TO_TICKS(5000));
 
+    fgr_time_deinit();
     nimble_port_stop();
     fgr_debug_deinit();
     fgr_ws2812_deinit();
