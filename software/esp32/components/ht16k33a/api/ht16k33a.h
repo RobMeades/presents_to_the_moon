@@ -52,7 +52,7 @@ extern "C" {
  * -------------------------------------------------------------- */
 
 /* Display handle. */
-typedef struct display display_t;
+typedef struct ht16k33a_display ht16k33a_display_t;
 
 /** Display brightness, 0 (off) to 15 (maximum). */
 typedef enum {
@@ -101,7 +101,7 @@ typedef enum {
  * scroll timer/task context, so keep it short: set an event, notify
  * a task, don't block.  The display is NOT automatically blanked.
  */
-typedef void (*ht16k33a_scroll_done_t) (display_t *display, void *user_data);
+typedef void (*ht16k33a_scroll_done_t) (ht16k33a_display_t *display, void *user_data);
 
 /* ----------------------------------------------------------------
  * FUNCTIONS
@@ -133,14 +133,14 @@ int32_t ht16k33a_init(int32_t i2c_port, int32_t sda_pin,
  * @param num_units    number of units, 1 to HT16K33A_MAX_UNITS.
  * @return             the display instance, NULL on error.
  */
-display_t *ht16k33a_create(const uint8_t *address_list, size_t num_units);
+ht16k33a_display_t *ht16k33a_create(const uint8_t *address_list, size_t num_units);
 
 /** Destroy a display instance.
  *
  * @param display the display instance that was returned by
  *                ht16k33a_create().
  */
-void ht16k33a_destroy(display_t *display);
+void ht16k33a_destroy(ht16k33a_display_t *display);
 
 /** Deinitialise the interface to the HT16K33A.  Any display
  * instances will be removed as if ht16k33a_destroy() had been
@@ -155,7 +155,7 @@ void ht16k33a_deinit();
  * @return           zero on success else negative error code
  *                   from esp_err_t.
  */
-int32_t ht16k33a_set_brightness(display_t *display,
+int32_t ht16k33a_set_brightness(ht16k33a_display_t *display,
                                 ht16k33a_brightness_t brightness);
 
 /** Get the brightness of a display.
@@ -164,7 +164,7 @@ int32_t ht16k33a_set_brightness(display_t *display,
  * @return        the brightness, else negative error code
  *                from esp_err_t.
  */
-int32_t ht16k33a_get_brightness(display_t *display);
+int32_t ht16k33a_get_brightness(ht16k33a_display_t *display);
 
 /** Turn the display on.
  *
@@ -172,7 +172,7 @@ int32_t ht16k33a_get_brightness(display_t *display);
  * @return           zero on success else negative error code
  *                   from esp_err_t.
  */
-int32_t ht16k33a_set_display_on(display_t *display);
+int32_t ht16k33a_set_display_on(ht16k33a_display_t *display);
 
 /** Turn the display off (blanked, contents retained).
  *
@@ -180,7 +180,7 @@ int32_t ht16k33a_set_display_on(display_t *display);
  * @return           zero on success else negative error code
  *                   from esp_err_t.
  */
-int32_t ht16k33a_set_display_off(display_t *display);
+int32_t ht16k33a_set_display_off(ht16k33a_display_t *display);
 
 /** Write a string to the display.
  *
@@ -212,7 +212,7 @@ int32_t ht16k33a_set_display_off(display_t *display);
  * @return        zero on success else negative error code from
  *                esp_err_t.
  */
-int32_t ht16k33a_set_text(display_t *display, const char *text);
+int32_t ht16k33a_set_text(ht16k33a_display_t *display, const char *text);
 
 /** Write a string to the display, fixed and centred, without
  * scrolling.  Characters beyond the display width are discarded.
@@ -225,7 +225,7 @@ int32_t ht16k33a_set_text(display_t *display, const char *text);
  * @return        zero on success else negative error code from
  *                esp_err_t.
  */
-int32_t ht16k33a_set_text_fixed(display_t *display, const char *text);
+int32_t ht16k33a_set_text_fixed(ht16k33a_display_t *display, const char *text);
 
 /** Set the scroll mode.
  *
@@ -234,7 +234,7 @@ int32_t ht16k33a_set_text_fixed(display_t *display, const char *text);
  * @return        zero on success else negative error code from
  *                esp_err_t.
  */
-int32_t ht16k33a_set_scroll_mode(display_t *display,
+int32_t ht16k33a_set_scroll_mode(ht16k33a_display_t *display,
                                  ht16k33a_scroll_mode_t mode);
 
 /** Get the scroll mode.
@@ -243,7 +243,7 @@ int32_t ht16k33a_set_scroll_mode(display_t *display,
  * @return        the scroll mode, else negative error code from
  *                esp_err_t.
  */
-int32_t ht16k33a_get_scroll_mode(display_t *display);
+int32_t ht16k33a_get_scroll_mode(ht16k33a_display_t *display);
 
 /** Set what happens when the scroll reaches the end of the text.
  *
@@ -258,7 +258,7 @@ int32_t ht16k33a_get_scroll_mode(display_t *display);
  * @return        zero on success else negative error code from
  *                esp_err_t.
  */
-int32_t ht16k33a_set_scroll_end(display_t *display,
+int32_t ht16k33a_set_scroll_end(ht16k33a_display_t *display,
                                 ht16k33a_scroll_end_t mode);
 
 /** Get what happens when the scroll reaches the end of the text.
@@ -267,7 +267,7 @@ int32_t ht16k33a_set_scroll_end(display_t *display,
  * @return        the end-of-scroll behaviour, else negative error
  *                code from esp_err_t.
  */
-int32_t ht16k33a_get_scroll_end(display_t *display);
+int32_t ht16k33a_get_scroll_end(ht16k33a_display_t *display);
 
 /** Set the scroll rate.
  *
@@ -278,7 +278,7 @@ int32_t ht16k33a_get_scroll_end(display_t *display);
  * @return             zero on success else negative error code
  *                     from esp_err_t.
  */
-int32_t ht16k33a_set_scroll_rate(display_t *display,
+int32_t ht16k33a_set_scroll_rate(ht16k33a_display_t *display,
                                  uint32_t milliseconds);
 
 /** Freeze the scroll engine exactly where it is.  The display keeps
@@ -291,7 +291,7 @@ int32_t ht16k33a_set_scroll_rate(display_t *display,
  * @return        zero on success else negative error code from
  *                esp_err_t.
  */
-int32_t ht16k33a_pause_scroll(display_t *display);
+int32_t ht16k33a_pause_scroll(ht16k33a_display_t *display);
 
 /** Resume a scroll previously paused with ht16k33a_pause_scroll().
  *
@@ -299,7 +299,7 @@ int32_t ht16k33a_pause_scroll(display_t *display);
  * @return        zero on success else negative error code from
  *                esp_err_t.
  */
-int32_t ht16k33a_resume_scroll(display_t *display);
+int32_t ht16k33a_resume_scroll(ht16k33a_display_t *display);
 
 /** Register a callback to be invoked each time the scroll reaches
  * its end point.  Only meaningful with HT16K33A_SCROLL_STOP_AT_END;
@@ -311,7 +311,7 @@ int32_t ht16k33a_resume_scroll(display_t *display);
  * @return          zero on success else negative error code from
  *                  esp_err_t.
  */
-int32_t ht16k33a_set_scroll_done_callback(display_t *display,
+int32_t ht16k33a_set_scroll_done_callback(ht16k33a_display_t *display,
                                           ht16k33a_scroll_done_t callback,
                                           void *user_data);
 
@@ -326,7 +326,7 @@ int32_t ht16k33a_set_scroll_done_callback(display_t *display,
  * @return        zero on success else negative error code from
  *                esp_err_t.
  */
-int32_t ht16k33a_write_immediate(display_t *display, const char *text);
+int32_t ht16k33a_write_immediate(ht16k33a_display_t *display, const char *text);
 
 /** Clear the display (all digits blank) and stop scrolling.
  *
@@ -334,7 +334,7 @@ int32_t ht16k33a_write_immediate(display_t *display, const char *text);
  * @return        zero on success else negative error code from
  *                esp_err_t.
  */
-int32_t ht16k33a_clear(display_t *display);
+int32_t ht16k33a_clear(ht16k33a_display_t *display);
 
 /** Get the total number of digits of a display.
  *
@@ -342,7 +342,7 @@ int32_t ht16k33a_clear(display_t *display);
  * @return        the number of digits, else negative error code
  *                from esp_err_t.
  */
-int32_t ht16k33a_get_num_digits(display_t *display);
+int32_t ht16k33a_get_num_digits(ht16k33a_display_t *display);
 
 #ifdef __cplusplus
 }

@@ -40,7 +40,6 @@
 #include "esp_task_wdt.h"
 #include "esp_random.h"
 #include "esp_bt.h"
-#include "ht16k33a.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
@@ -61,6 +60,7 @@
 #include "fgr_network.h"
 #include "fgr_time.h"
 
+#include "display.h"
 #include "tmc5160.h"
 
 /* ----------------------------------------------------------------
@@ -76,6 +76,9 @@
 
 // Base I2C address of a HT16K33A display driver.
 #define HT16K33A_I2C_BASE_ADDRESS 0x70
+
+// Priority for displaying the clock (low)
+#define DISPLAY_CLOCK_PRIORITY 10
 
 // How many seconds to wait for time synchronisation
 #define TIME_SYNC_WAIT_SECONDS 30
@@ -382,6 +385,7 @@ typedef struct {
     QueueHandle_t command_queue;
     TaskHandle_t command_task;
     display_t *display;
+    display_source_t *display_source_clock;
     ble_uuid16_t service_uuid;
     struct ble_hs_adv_fields ble_adv_fields;
     uint16_t ble_connection_handle;
@@ -491,6 +495,27 @@ static const uint32_t g_track_duration_ms[] = {0, 1000, 1000, 1000,
                                                1000, 1000};
 
 // THERE ARE MORE VARIABLES FURTHER DOWN
+
+/* ----------------------------------------------------------------
+ * STATIC FUNCTIONS: MISC
+ * -------------------------------------------------------------- */
+
+// Callback to display the clock.
+static bool display_clock_cb (char *buffer, size_t buffer_size, void *user_data)
+{
+    (void) user_data;
+
+    if (buffer && (buffer_size >= 8 + 1)) {
+        time_t now;
+        struct tm timeinfo;
+
+        time(&now);
+        localtime_r(&now, &timeinfo);
+        strftime(buffer, buffer_size, "  %l.%M.%S", &timeinfo);
+    }
+
+    return true;
+}
 
 /* ----------------------------------------------------------------
  * STATIC FUNCTIONS: NVS RELATED
@@ -3326,7 +3351,7 @@ static int32_t init(context_t *context)
             }
         }
 
-    // Set the pins that control the audio track all high so that they can be pulled low
+        // Set the pins that control the audio track all high so that they can be pulled low
 #if defined(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_0) && (CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_0 >= 0)
         gpio_set_level(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_0, 1);
         gpio_set_direction(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_0, GPIO_MODE_OUTPUT);
@@ -3366,16 +3391,15 @@ static int32_t init(context_t *context)
 
         // Initialise the HT16K33A countdown display
         if (err == ESP_OK) {
-            err = ht16k33a_init(CONFIG_HT16K33A_I2C_NUM, CONFIG_HT16K33A_I2C_SDA_PIN,
-                                CONFIG_HT16K33A_I2C_SCL_PIN, CONFIG_HT16K33A_I2C_CLOCK_HZ);
+            err = display_init(CONFIG_HT16K33A_I2C_NUM, CONFIG_HT16K33A_I2C_SDA_PIN,
+                               CONFIG_HT16K33A_I2C_SCL_PIN, CONFIG_HT16K33A_I2C_CLOCK_HZ);
             if (err == ESP_OK) {
                 err = -ESP_ERR_NO_MEM;
-                context->display = ht16k33a_create(g_ht16k33a_i2c_address_list,
-                                                   FGR_UTIL_ARRAY_LENGTH(g_ht16k33a_i2c_address_list));
+                context->display = display_create(g_ht16k33a_i2c_address_list,
+                                                  FGR_UTIL_ARRAY_LENGTH(g_ht16k33a_i2c_address_list),
+                                                  HT16K33A_SCROLL_LEFT, HT16K33A_SCROLL_WRAP, 0);
                 if (context->display) {
-                    ht16k33a_set_scroll_mode(context->display, HT16K33A_SCROLL_LEFT);
-                    ht16k33a_set_scroll_end(context->display, HT16K33A_SCROLL_WRAP);
-                    err = ht16k33a_set_text(context->display, "Presents to the moon");
+                    err = display_set_message(context->display, "boot", 1000);
                 }
             }
         }
@@ -3386,6 +3410,9 @@ static int32_t init(context_t *context)
                                    CONFIG_FGR_NETWORK_WIFI_PASSWORD,
                                    WIFI_AUTH_OPEN,
                                    CONFIG_FGR_NETWORK_WIFI_REDUCED_TX_POWER);
+            if (err != ESP_OK) {
+                display_set_message(context->display, "no Wifi", 1000);
+            }
         }
 
         // Establish absolute time
@@ -3401,8 +3428,16 @@ static int32_t init(context_t *context)
                     err = fgr_time_sync_wait(1);
                 } while ((err < 0) && !timer_has_expired(&timer));
                 if (err >= 0) {
-                    err = ESP_OK;
+                    // Display the time
+                    context->display_source_clock = display_source_add(context->display,
+                                                                       display_clock_cb,
+                                                                       context, DISPLAY_CLOCK_PRIORITY,
+                                                                       500, "clock");
+                    if (context->display_source_clock) {
+                        err = ESP_OK;
+                    }
                 } else {
+                    display_set_message(context->display, "no time", 1000);
                     ESP_LOGE(TAG, "unable to establish time!");
                 }
             }
@@ -3548,7 +3583,7 @@ void app_main(void)
     }
     vTaskDelay(pdMS_TO_TICKS(5000));
 
-    fgr_time_deinit();
+    display_deinit();
     nimble_port_stop();
     fgr_debug_deinit();
     fgr_ws2812_deinit();

@@ -100,8 +100,8 @@ typedef struct {
     bool     present;
 } unit_t;
 
-// A logical display spanning one or more units.
-struct display {
+// A logical HT16K33A display spanning one or more units.
+struct ht16k33a_display {
     unit_t   units[HT16K33A_MAX_UNITS];
     size_t   num_units;
     size_t   num_digits;
@@ -126,17 +126,17 @@ struct display {
     ht16k33a_scroll_done_t  done_callback;
     void                   *done_user_data;
     esp_timer_handle_t      scroll_timer;
-    SLIST_ENTRY(display) next;
+    SLIST_ENTRY(ht16k33a_display) next;
 };
 
-SLIST_HEAD(display_list_t, display);
+SLIST_HEAD(ht16k33a_display_list_t, ht16k33a_display);
 
 typedef struct {
     SemaphoreHandle_t lock;
     i2c_master_bus_handle_t bus_handle; // v5 bus handle
     bool bus_initialised;
     int32_t clock_hz;
-    struct display_list_t display_list;
+    struct ht16k33a_display_list_t display_list;
 } context_t;
 
 /* ----------------------------------------------------------------
@@ -519,7 +519,7 @@ static uint16_t char_to_segments(char c, bool dp)
 // or '`' folded into the preceding character as DP.  Returns the
 // number of visible stream positions (r_len).
 // IMPORTANT: the context must be locked before this is called.
-static size_t render_text(display_t *display)
+static size_t render_text(ht16k33a_display_t *display)
 {
     size_t out = 0;
 
@@ -561,7 +561,7 @@ static int32_t unit_command(unit_t *unit, uint8_t command)
 
 // Push the current RAM of all units over I2C, v5 API.
 // IMPORTANT: the context must be locked before this is called.
-static int32_t ram_flush(display_t *display)
+static int32_t ram_flush(ht16k33a_display_t *display)
 {
     int32_t err = ESP_OK;
 
@@ -592,7 +592,7 @@ static int32_t ram_flush(display_t *display)
 
 // Blank the RAM of a display.
 // IMPORTANT: the context must be locked before this is called.
-static void ram_blank(display_t *display)
+static void ram_blank(ht16k33a_display_t *display)
 {
     for (size_t x = 0; x < display->num_units; x++) {
         memset(display->units[x].ram, 0, sizeof(display->units[x].ram));
@@ -605,7 +605,7 @@ static void ram_blank(display_t *display)
 // of the text.  Digit k of the display shows
 //   r_text[(position + k) % L]  if that index < r_len, else blank.
 // IMPORTANT: the context must be locked before this is called.
-static void ram_render(display_t *display, size_t position)
+static void ram_render(ht16k33a_display_t *display, size_t position)
 {
     size_t length = display->r_len + display->num_digits;
 
@@ -625,7 +625,7 @@ static void ram_render(display_t *display, size_t position)
 
 // Stop the scroll timer.
 // IMPORTANT: the context must be locked before this is called.
-static void scroll_stop(display_t *display)
+static void scroll_stop(ht16k33a_display_t *display)
 {
     if (display->scroll_timer) {
         esp_timer_stop(display->scroll_timer);
@@ -637,7 +637,7 @@ static void scroll_stop(display_t *display)
 
 // Advance the scroll one step and re-render.  Called from the timer.
 // IMPORTANT: the context must be locked before this is called.
-static void scroll_tick(display_t *display)
+static void scroll_tick(ht16k33a_display_t *display)
 {
     size_t length = display->r_len + display->num_digits;
 
@@ -749,7 +749,7 @@ static void scroll_tick(display_t *display)
 // Timer callback: takes the lock and calls scroll_tick().
 static void scroll_timer_callback(void *arg)
 {
-    display_t *display = (display_t *) arg;
+    ht16k33a_display_t *display = (ht16k33a_display_t *) arg;
 
     if (g_context.lock) {
         CONTEXT_LOCK(g_context.lock, "scroll_timer_callback()");
@@ -760,7 +760,7 @@ static void scroll_timer_callback(void *arg)
 
 // Start (or restart) the scroll timer.
 // IMPORTANT: the context must be locked before this is called.
-static int32_t scroll_start(display_t *display)
+static int32_t scroll_start(ht16k33a_display_t *display)
 {
     int32_t err = ESP_OK;
 
@@ -798,7 +798,7 @@ static int32_t scroll_start(display_t *display)
 
 // Turn display on or off.
 // IMPORTANT the context should be locked before this is called.
-static int32_t display_on(display_t *display, bool on_not_off)
+static int32_t display_on(ht16k33a_display_t *display, bool on_not_off)
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
 
@@ -827,7 +827,7 @@ static int32_t display_on(display_t *display, bool on_not_off)
 
 // Clean up a display.
 // IMPORTANT the context should be locked before this is called.
-static void clean_up(display_t *display)
+static void clean_up(ht16k33a_display_t *display)
 {
     if (display) {
         scroll_stop(display);
@@ -839,8 +839,8 @@ static void clean_up(display_t *display)
             }
         }
 
-        display_t *iter;
-        display_t *prev = NULL;
+        ht16k33a_display_t *iter;
+        ht16k33a_display_t *prev = NULL;
         SLIST_FOREACH(iter, &g_context.display_list, next) {
             if (iter == display) {
                 if (prev == NULL) {
@@ -910,9 +910,9 @@ int32_t ht16k33a_init(int32_t i2c_port, int32_t sda_pin,
 }
 
 // Create a display instance, adding one device handle per unit.
-display_t *ht16k33a_create(const uint8_t *address_list, size_t num_units)
+ht16k33a_display_t *ht16k33a_create(const uint8_t *address_list, size_t num_units)
 {
-    display_t *display = NULL;
+    ht16k33a_display_t *display = NULL;
 
     if (g_context.bus_initialised && address_list && (num_units > 0) && (num_units <= HT16K33A_MAX_UNITS)) {
 
@@ -987,7 +987,7 @@ display_t *ht16k33a_create(const uint8_t *address_list, size_t num_units)
 }
 
 // Destroy a display instance.
-void ht16k33a_destroy(display_t *display)
+void ht16k33a_destroy(ht16k33a_display_t *display)
 {
     if (g_context.bus_initialised) {
 
@@ -1004,7 +1004,7 @@ void ht16k33a_deinit()
         CONTEXT_LOCK(g_context.lock, "ht16k33a_deinit()");
 
         while (!SLIST_EMPTY(&g_context.display_list)) {
-            display_t *p = SLIST_FIRST(&g_context.display_list);
+            ht16k33a_display_t *p = SLIST_FIRST(&g_context.display_list);
             clean_up(p);
         }
 
@@ -1020,7 +1020,7 @@ void ht16k33a_deinit()
 }
 
 // Set brightness.
-int32_t ht16k33a_set_brightness(display_t *display,
+int32_t ht16k33a_set_brightness(ht16k33a_display_t *display,
                                 ht16k33a_brightness_t brightness)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
@@ -1050,7 +1050,7 @@ int32_t ht16k33a_set_brightness(display_t *display,
 }
 
 // Get brightness.
-int32_t ht16k33a_get_brightness(display_t *display)
+int32_t ht16k33a_get_brightness(ht16k33a_display_t *display)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
@@ -1070,7 +1070,7 @@ int32_t ht16k33a_get_brightness(display_t *display)
 }
 
 // Turn the display on.
-int32_t ht16k33a_set_display_on(display_t *display)
+int32_t ht16k33a_set_display_on(ht16k33a_display_t *display)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
@@ -1085,7 +1085,7 @@ int32_t ht16k33a_set_display_on(display_t *display)
 }
 
 // Turn the display off.
-int32_t ht16k33a_set_display_off(display_t *display)
+int32_t ht16k33a_set_display_off(ht16k33a_display_t *display)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
@@ -1100,7 +1100,7 @@ int32_t ht16k33a_set_display_off(display_t *display)
 }
 
 // Set the text.
-int32_t ht16k33a_set_text(display_t *display, const char *text)
+int32_t ht16k33a_set_text(ht16k33a_display_t *display, const char *text)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
@@ -1150,7 +1150,7 @@ int32_t ht16k33a_set_text(display_t *display, const char *text)
 }
 
 // Set text fixed (no scrolling).
-int32_t ht16k33a_set_text_fixed(display_t *display, const char *text)
+int32_t ht16k33a_set_text_fixed(ht16k33a_display_t *display, const char *text)
 {
     int32_t err = ht16k33a_set_scroll_mode(display, HT16K33A_SCROLL_NONE);
     if (err == ESP_OK) {
@@ -1161,7 +1161,7 @@ int32_t ht16k33a_set_text_fixed(display_t *display, const char *text)
 }
 
 // Set scroll mode.
-int32_t ht16k33a_set_scroll_mode(display_t *display,
+int32_t ht16k33a_set_scroll_mode(ht16k33a_display_t *display,
                                  ht16k33a_scroll_mode_t mode)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
@@ -1195,7 +1195,7 @@ int32_t ht16k33a_set_scroll_mode(display_t *display,
 }
 
 // Get scroll mode.
-int32_t ht16k33a_get_scroll_mode(display_t *display)
+int32_t ht16k33a_get_scroll_mode(ht16k33a_display_t *display)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
@@ -1215,7 +1215,7 @@ int32_t ht16k33a_get_scroll_mode(display_t *display)
 }
 
 // Set end-of-scroll behaviour.
-int32_t ht16k33a_set_scroll_end(display_t *display,
+int32_t ht16k33a_set_scroll_end(ht16k33a_display_t *display,
                                 ht16k33a_scroll_end_t mode)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
@@ -1237,7 +1237,7 @@ int32_t ht16k33a_set_scroll_end(display_t *display,
 }
 
 // Get end-of-scroll behaviour.
-int32_t ht16k33a_get_scroll_end(display_t *display)
+int32_t ht16k33a_get_scroll_end(ht16k33a_display_t *display)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
@@ -1257,7 +1257,7 @@ int32_t ht16k33a_get_scroll_end(display_t *display)
 }
 
 // Set scroll rate.
-int32_t ht16k33a_set_scroll_rate(display_t *display,
+int32_t ht16k33a_set_scroll_rate(ht16k33a_display_t *display,
                                  uint32_t milliseconds)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
@@ -1284,7 +1284,7 @@ int32_t ht16k33a_set_scroll_rate(display_t *display,
 }
 
 // Pause scrolling.
-int32_t ht16k33a_pause_scroll(display_t *display)
+int32_t ht16k33a_pause_scroll(ht16k33a_display_t *display)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
@@ -1305,7 +1305,7 @@ int32_t ht16k33a_pause_scroll(display_t *display)
 }
 
 // Resume scrolling.
-int32_t ht16k33a_resume_scroll(display_t *display)
+int32_t ht16k33a_resume_scroll(ht16k33a_display_t *display)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
@@ -1333,7 +1333,7 @@ int32_t ht16k33a_resume_scroll(display_t *display)
 }
 
 // Set the scroll-done callback.
-int32_t ht16k33a_set_scroll_done_callback(display_t *display,
+int32_t ht16k33a_set_scroll_done_callback(ht16k33a_display_t *display,
                                           ht16k33a_scroll_done_t callback,
                                           void *user_data)
 {
@@ -1357,7 +1357,7 @@ int32_t ht16k33a_set_scroll_done_callback(display_t *display,
 }
 
 // Write immediate text (no scroll).
-int32_t ht16k33a_write_immediate(display_t *display, const char *text)
+int32_t ht16k33a_write_immediate(ht16k33a_display_t *display, const char *text)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
@@ -1403,7 +1403,7 @@ int32_t ht16k33a_write_immediate(display_t *display, const char *text)
 }
 
 // Clear the display.
-int32_t ht16k33a_clear(display_t *display)
+int32_t ht16k33a_clear(ht16k33a_display_t *display)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
@@ -1431,7 +1431,7 @@ int32_t ht16k33a_clear(display_t *display)
 }
 
 // Get the number of digits.
-int32_t ht16k33a_get_num_digits(display_t *display)
+int32_t ht16k33a_get_num_digits(ht16k33a_display_t *display)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
