@@ -78,17 +78,22 @@ typedef enum {
  * number of available digits.
  */
 typedef enum {
-    HT16K33A_SCROLL_NONE,     /**< truncate at the display width */
-    HT16K33A_SCROLL_LEFT,     /**< scroll right-to-left (text moves left) */
-    HT16K33A_SCROLL_RIGHT     /**< scroll left-to-right (text moves right) */
+    HT16K33A_SCROLL_NONE,     /** truncate at the display width */
+    HT16K33A_SCROLL_LEFT,     /** scroll right-to-left (text moves left) */
+    HT16K33A_SCROLL_RIGHT     /** scroll left-to-right (text moves right) */
 } ht16k33a_scroll_mode_t;
 
 /** What the scroll engine does when it reaches the end of the text.
  */
 typedef enum {
-    HT16K33A_SCROLL_WRAP,       /**< wrap round to the start and keep going */
-    HT16K33A_SCROLL_BOUNCE,     /**< reverse direction at each end */
-    HT16K33A_SCROLL_STOP_AT_END /**< stop with the last N digits visible */
+    HT16K33A_SCROLL_WRAP,       /** loop as a continuous ticker, with
+                                    a gap of one display-width between
+                                    copies */
+    HT16K33A_SCROLL_BOUNCE,     /** scroll to the end, nudge one
+                                    position further, then back one,
+                                    then stop */
+    HT16K33A_SCROLL_STOP_AT_END /** stop with the last character on
+                                    the rightmost digit */
 } ht16k33a_scroll_end_t;
 
 /** Called when the scroll engine reaches its end point (only

@@ -135,6 +135,7 @@ typedef struct {
     SemaphoreHandle_t lock;
     i2c_master_bus_handle_t bus_handle; // v5 bus handle
     bool bus_initialised;
+    int32_t clock_hz;
     struct display_list_t display_list;
 } context_t;
 
@@ -522,16 +523,16 @@ static size_t render_text(display_t *display)
 {
     size_t out = 0;
 
-    for (size_t c = 0; c < display->text_len; c++) {
+    for (size_t x = 0; x < display->text_len; x++) {
         bool dp = false;
-        char n = display->text[c];
-        while ((c + 1 < display->text_len) &&
-               ((display->text[c + 1] == '.') ||
-                (display->text[c + 1] == ':') ||
-                (display->text[c + 1] == '/') ||
-                (display->text[c + 1] == '`'))) {
+        char n = display->text[x];
+        while ((x + 1 < display->text_len) &&
+               ((display->text[x + 1] == '.') ||
+                (display->text[x + 1] == ':') ||
+                (display->text[x + 1] == '/') ||
+                (display->text[x + 1] == '`'))) {
             dp = true;
-            c++;
+            x++;
         }
         display->r_text[out++] = char_to_segments(n, dp);
     }
@@ -564,19 +565,19 @@ static int32_t ram_flush(display_t *display)
 {
     int32_t err = ESP_OK;
 
-    for (size_t u = 0; (u < display->num_units) && (err == ESP_OK); u++) {
-        unit_t *unit = &display->units[u];
+    for (size_t x = 0; (x < display->num_units) && (err == ESP_OK); x++) {
+        unit_t *unit = &display->units[x];
 
         if (unit->present && unit->dev_handle) {
             uint8_t buffer[1 + RAM_BYTES_PER_UNIT];
             buffer[0] = CMD_DISPLAY_RAM;
             for (size_t d = 0; d < HT16K33A_DIGITS_PER_UNIT; d++) {
-                buffer[1 + d * 2]     = (uint8_t) (unit->ram[d] & 0xff);
-                buffer[2 + d * 2]     = (uint8_t) ((unit->ram[d] >> 8) & 0xff);
+                buffer[1 + d * 2] = (uint8_t) (unit->ram[d] & 0xff);
+                buffer[2 + d * 2] = (uint8_t) ((unit->ram[d] >> 8) & 0xff);
             }
             esp_err_t i2c_err = i2c_master_transmit(unit->dev_handle,
                                                     buffer, sizeof(buffer),
-                                                    pdMS_TO_TICKS(100));
+                                                    1000);
             if (i2c_err != ESP_OK) {
                 ESP_LOGE(TAG, "I2C RAM flush to 0x%02x failed (%s).",
                          unit->address, esp_err_to_name(i2c_err));
@@ -593,8 +594,8 @@ static int32_t ram_flush(display_t *display)
 // IMPORTANT: the context must be locked before this is called.
 static void ram_blank(display_t *display)
 {
-    for (size_t u = 0; u < display->num_units; u++) {
-        memset(display->units[u].ram, 0, sizeof(display->units[u].ram));
+    for (size_t x = 0; x < display->num_units; x++) {
+        memset(display->units[x].ram, 0, sizeof(display->units[x].ram));
     }
 }
 
@@ -606,20 +607,18 @@ static void ram_blank(display_t *display)
 // IMPORTANT: the context must be locked before this is called.
 static void ram_render(display_t *display, size_t position)
 {
-    size_t L = display->r_len + display->num_digits;
+    size_t length = display->r_len + display->num_digits;
 
     ram_blank(display);
 
-    if (L == 0) {
-        return;
-    }
-
-    for (size_t k = 0; k < display->num_digits; k++) {
-        size_t idx = (position + k) % L;
-        if (idx < display->r_len) {
-            size_t unit_index = k / HT16K33A_DIGITS_PER_UNIT;
-            size_t unit_digit = k % HT16K33A_DIGITS_PER_UNIT;
-            display->units[unit_index].ram[unit_digit] = display->r_text[idx];
+    if (length > 0) {
+        for (size_t x = 0; x < display->num_digits; x++) {
+            size_t index = (position + x) % length;
+            if (index < display->r_len) {
+                size_t unit_index = x / HT16K33A_DIGITS_PER_UNIT;
+                size_t unit_digit = x % HT16K33A_DIGITS_PER_UNIT;
+                display->units[unit_index].ram[unit_digit] = display->r_text[index];
+            }
         }
     }
 }
@@ -640,9 +639,9 @@ static void scroll_stop(display_t *display)
 // IMPORTANT: the context must be locked before this is called.
 static void scroll_tick(display_t *display)
 {
-    size_t L = display->r_len + display->num_digits;
+    size_t length = display->r_len + display->num_digits;
 
-    if (display->paused || (L == 0) ||
+    if (display->paused || (length == 0) ||
         (display->r_len <= display->num_digits)) {
         // Nothing to do
     } else {
@@ -656,7 +655,7 @@ static void scroll_tick(display_t *display)
 
             if (display->scroll_direction > 0) {
                 // Outbound leg.
-                if (display->scroll_offset + 1 >= L) {
+                if (display->scroll_offset + 1 >= length) {
                     // Reached the far end of the ticker stream.
                     if (display->scroll_end == HT16K33A_SCROLL_WRAP) {
                         display->scroll_offset = 0;
@@ -705,7 +704,7 @@ static void scroll_tick(display_t *display)
 
             if (display->scroll_direction < 0) {
                 // Outbound leg.
-                if (display->scroll_offset + 1 >= L) {
+                if (display->scroll_offset + 1 >= length) {
                     if (display->scroll_end == HT16K33A_SCROLL_WRAP) {
                         display->scroll_offset = 0;
                     } else if (display->scroll_end == HT16K33A_SCROLL_BOUNCE) {
@@ -900,6 +899,7 @@ int32_t ht16k33a_init(int32_t i2c_port, int32_t sda_pin,
                 err = -i2c_err;
             } else {
                 g_context.bus_initialised = true;
+                g_context.clock_hz = clock_hz;
             }
         }
 
@@ -938,13 +938,16 @@ display_t *ht16k33a_create(const uint8_t *address_list, size_t num_units)
                 i2c_device_config_t dev_config = {
                     .dev_addr_length = I2C_ADDR_BIT_LEN_7,
                     .device_address = address_list[x],
-                    .scl_speed_hz = 100000, // 100 kHz typical for HT16K33A
+                    .scl_speed_hz = g_context.clock_hz,
                 };
 
                 esp_err_t i2c_err = i2c_master_bus_add_device(g_context.bus_handle,
                                                               &dev_config,
                                                               &display->units[x].dev_handle);
                 if (i2c_err == ESP_OK) {
+                    err = i2c_master_probe(g_context.bus_handle, address_list[x], 1000);
+                    ESP_LOGI(TAG, "Probe 0x%02x: %s", address_list[x], esp_err_to_name(err));
+
                     display->units[x].present = true;
                     err = unit_command(&display->units[x], CMD_OSCILLATOR_ON);
                     if (err == ESP_OK) {
@@ -965,7 +968,7 @@ display_t *ht16k33a_create(const uint8_t *address_list, size_t num_units)
             }
 
             if (err == ESP_OK) {
-                ram_flush(display);
+                err = ram_flush(display);
             }
         }
 
@@ -1330,10 +1333,9 @@ int32_t ht16k33a_resume_scroll(display_t *display)
 }
 
 // Set the scroll-done callback.
-int32_t ht16k33a_set_scroll_done_callback(
-                    display_t *display,
-                    ht16k33a_scroll_done_t callback,
-                    void *user_data)
+int32_t ht16k33a_set_scroll_done_callback(display_t *display,
+                                          ht16k33a_scroll_done_t callback,
+                                          void *user_data)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 

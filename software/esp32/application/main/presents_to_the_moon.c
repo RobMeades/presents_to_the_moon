@@ -438,7 +438,7 @@ static context_t g_context = {.service_uuid = BLE_UUID16_INIT(SERVICE_UUID),
 FGR_RRAM_DEFINE(retained_ram_t, retained_ram);
 
 // The I2C addresses of the countdown display.
-static const uint8_t g_ht16k33a_i2c_address_list[] = {HT16K33A_I2C_BASE_ADDRESS};
+static const uint8_t g_ht16k33a_i2c_address_list[] = {HT16K33A_I2C_BASE_ADDRESS, HT16K33A_I2C_BASE_ADDRESS + 1};
 
 // The names of the launcher states for debug prints;
 // entries are in the same order as launcher_state_t
@@ -3358,9 +3358,8 @@ static int32_t init(context_t *context)
                                                    FGR_UTIL_ARRAY_LENGTH(g_ht16k33a_i2c_address_list));
                 if (context->display) {
                     ht16k33a_set_scroll_mode(context->display, HT16K33A_SCROLL_LEFT);
-                    ht16k33a_set_scroll_rate(context->display, 0);
-                    ht16k33a_set_scroll_end(context->display, HT16K33A_SCROLL_BOUNCE);
-                    err = ht16k33a_set_text(context->display, "Rubber baby buggy bumpers");
+                    ht16k33a_set_scroll_end(context->display, HT16K33A_SCROLL_WRAP);
+                    err = ht16k33a_set_text(context->display, "Presents to the moon");
                 }
             }
         }
