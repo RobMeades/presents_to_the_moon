@@ -362,7 +362,7 @@ typedef enum {
     COMMAND_MUTE,                                  // read/write, Boolean
     COMMAND_STATE,                                 // read only, uint32_t
     COMMAND_HEIGHT_CURRENT_MM,                     // read only, uint32_t
-    COMMAND_T0,                               // read only, uint64_t
+    COMMAND_T0,                                    // read only, uint64_t
     COMMAND_NUMBER_OF
 } command_t;
 
@@ -585,7 +585,7 @@ static bool display_clock_cb(char *buffer, size_t buffer_size, void *user_data)
 
         time(&now);
         localtime_r(&now, &timeinfo);
-        strftime(buffer, buffer_size, "  %l.%M.%S", &timeinfo);
+        strftime(buffer, buffer_size, "  %H.%M.%S", &timeinfo);
     }
 
     return true;
@@ -1751,8 +1751,10 @@ static bool auto_timer_has_expired(launcher_t *launcher)
             // Our possible T0 is inside an activity period, check/set the auto timer
             launcher->auto_period_seconds = launch_interval_seconds;
             if (launcher->timer_auto.duration_us == 0) {
-                // No timer was set, must be the first time in, let's go...
+                // No timer was set, must be the first time into an active period, let's go...
                 has_expired = true;
+                // Update T0 directly in case this is the first time ever
+                __atomic_store_n(&launcher->t0, t0, __ATOMIC_RELAXED);
             } else {
                 //  Timer was already set, see if it has expired
                 has_expired = timer_has_expired(&launcher->timer_auto);
@@ -1810,8 +1812,8 @@ static void auto_cb(void *handle, void *arg)
         } else {
             // Couldn't start, try again in a shorter time
             launcher->auto_period_seconds = AUTO_MODE_RETRY_TIME_SECONDS;
-            time_t pending_t0 = __atomic_load_n(&launcher->pending_t0, __ATOMIC_RELAXED);
-            __atomic_store_n(&launcher->pending_t0, pending_t0 - AUTO_MODE_RETRY_TIME_SECONDS, __ATOMIC_RELAXED);
+            time_t t0 = __atomic_load_n(&launcher->t0, __ATOMIC_RELAXED);
+            __atomic_store_n(&launcher->t0, t0 - AUTO_MODE_RETRY_TIME_SECONDS, __ATOMIC_RELAXED);
             ESP_LOGI(TAG, "unable to auto-run in state %s, retrying in %d second(s).",
                      g_launcher_state_name[launcher->state], launcher->auto_period_seconds);
         }
@@ -2192,6 +2194,9 @@ static launcher_state_t advance_state(launcher_t *launcher, launcher_state_t com
                 // If we know where the ground is we can transition
                 // to ready state
                 if ((ground_level_mm != POSITION_UNKNOWN) && (height_mm != POSITION_UNKNOWN)) {
+                    // Move the pending T0 to be the real T0
+                    time_t pending_t0 = __atomic_load_n(&launcher->pending_t0, __ATOMIC_RELAXED);
+                    __atomic_store_n(&launcher->t0, pending_t0, __ATOMIC_RELAXED);
                     next_state = LAUNCHER_STATE_READY;
                 } else {
                     // From height unknown state we can only do steps
@@ -2237,9 +2242,6 @@ static launcher_state_t advance_state(launcher_t *launcher, launcher_state_t com
                                  commanded_state, launcher->state);
                     break;
                 }
-                // If we're ready we can move the pending T0 to be the real T0
-                time_t pending_t0 = __atomic_load_n(&launcher->pending_t0, __ATOMIC_RELAXED);
-                __atomic_store_n(&launcher->t0, pending_t0, __ATOMIC_RELAXED);
             break;
             case LAUNCHER_STATE_MOVE_UP:
                 if (commanded_state == LAUNCHER_STATE_MOVE_UP) {
@@ -3958,6 +3960,7 @@ static void command_cb(void *handle, void *arg)
                     }
                 break;
                 case COMMAND_TYPE_READ_ONLY_UINT32:
+                case COMMAND_TYPE_READ_ONLY_UINT64:
                     ESP_LOGI(TAG, "command %s (0x%04x), read: %lld.", name, uuid, value);
                 break;
                 default:
