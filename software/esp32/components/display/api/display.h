@@ -62,10 +62,10 @@ extern "C" {
 /** The default refresh period, in milliseconds, for a source
  * that passes zero for refresh_ms when being added.  Keep this
  * comfortably above fgr_task's loop delay
- * (FGR_UTIL_WATCHDOG_FEED_TIME_MS); 250 ms is a sensible
+ * (FGR_UTIL_WATCHDOG_FEED_TIME_MS); 500 ms is a sensible
  * default.
  */
-#define DISPLAY_SOURCE_DEFAULT_REFRESH_MS 250
+#define DISPLAY_SOURCE_DEFAULT_REFRESH_MS 500
 
 /* ----------------------------------------------------------------
  * TYPES

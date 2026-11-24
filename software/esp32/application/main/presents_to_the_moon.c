@@ -41,6 +41,7 @@
 #include "esp_task_wdt.h"
 #include "esp_random.h"
 #include "esp_bt.h"
+#include "ht16k33a.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
@@ -84,8 +85,15 @@
 // Priority for displaying the countdown (higher)
 #define DISPLAY_COUNTDOWN_PRIORITY 5
 
+// Priority for displaying general information (even higher)
+#define DISPLAY_INFORMATION_PRIORITY 3
+
 // An out of range time_t value to represent countdown not in use
 #define NO_COUNTDOWN INT64_MAX
+
+// How far away the T0 time needs to be from us to put up
+// a more explanatory message
+#define COUNTDOWN_INFORMATION_THRESHOLD_SECONDS (60 * 60)
 
 // How many seconds to wait for time synchronisation
 #define TIME_SYNC_WAIT_SECONDS 30
@@ -455,6 +463,7 @@ typedef struct {
     display_t *display;
     display_source_t *display_source_clock;
     display_source_t *display_source_countdown;
+    display_source_t *display_source_information;
     ble_uuid16_t service_uuid;
     struct ble_hs_adv_fields ble_adv_fields;
     uint16_t ble_connection_handle;
@@ -634,6 +643,40 @@ static bool display_countdown_cb(char *buffer, size_t buffer_size, void *user_da
     }
 
     return counting_down;
+}
+
+// Callback to display a longer message about future T0's.
+static bool display_information_cb(char *buffer, size_t buffer_size, void *user_data)
+{
+    bool info = false;
+    context_t *context = (context_t *) user_data;
+    launcher_t *launcher = &context->launcher;
+
+    time_t t0 = __atomic_load_n(&launcher->t0, __ATOMIC_RELAXED);
+    time_t now;
+    time(&now);
+    if ((t0 != NO_COUNTDOWN) && (t0 - now > COUNTDOWN_INFORMATION_THRESHOLD_SECONDS)) {
+        // If T0 is a long way away, put up an explanatory message instead of the countdown
+        struct tm t0_tm;
+        localtime_r(&t0, &t0_tm);
+        struct tm midnight_tonight_tm;
+        localtime_r(&now, &midnight_tonight_tm);
+        midnight_tonight_tm.tm_hour = 0;
+        midnight_tonight_tm.tm_min  = 0;
+        midnight_tonight_tm.tm_sec  = 0;
+        midnight_tonight_tm.tm_mday += 1;
+        midnight_tonight_tm.tm_isdst = -1;
+        time_t midnight_tonight = mktime(&midnight_tonight_tm);
+        char time_buffer[32];
+        strftime(time_buffer, sizeof(time_buffer), "%H.%M.%S", &t0_tm);
+        snprintf(buffer, buffer_size, "next launch %sat %s",
+                 t0 > midnight_tonight ? "tomorrow " : "", time_buffer);
+        info = true;
+    } else {
+        *buffer = 0;
+    }
+
+    return info;
 }
 
 /* ----------------------------------------------------------------
@@ -1699,7 +1742,8 @@ static bool auto_is_active(int32_t possible_t0_seconds_since_midnight,
     return active;
 }
 
-// Return the time to the next launch in seconds
+// Return the time to the next launch in seconds, aligning the
+// intervals to the hour.
 static time_t auto_seconds_to_next_launch(time_t midnight, time_t now,
                                           int32_t launch_interval_seconds)
 {
@@ -1827,7 +1871,8 @@ static bool auto_timer_has_expired(launcher_t *launcher)
 // Task callback to run auto mode.
 static void auto_cb(void *handle, void *arg)
 {
-    launcher_t *launcher = (launcher_t *) arg;
+    context_t *context = (context_t *) arg;
+    launcher_t *launcher = &context->launcher;
 
     (void) handle;
 
@@ -2442,6 +2487,8 @@ static void launcher_cb(void *handle, void *arg)
                 launcher->state = next_state;
             }
         }
+
+        esp_task_wdt_reset();
     }
 
     // Make sure we advance state at least once in case there are any internal changes
@@ -2454,6 +2501,8 @@ static void launcher_cb(void *handle, void *arg)
     }
 
     CONTEXT_UNLOCK(context->lock, "launcher_cb");
+
+    vTaskDelay(pdMS_TO_TICKS(100));
 }
 
 /* ----------------------------------------------------------------
@@ -3998,9 +4047,12 @@ static void command_cb(void *handle, void *arg)
         } else {
             ESP_LOGE(TAG, "unknown command (%d)!", command);
         }
+        esp_task_wdt_reset();
     }
 
     CONTEXT_UNLOCK(context->lock, "command_cb");
+
+    vTaskDelay(pdMS_TO_TICKS(100));
 }
 
 /* ----------------------------------------------------------------
@@ -4038,6 +4090,10 @@ static int32_t init(context_t *context)
     if (err == ESP_OK) {
 
         CONTEXT_LOCK(context->lock, "init");
+
+        // Set UK, non-daylight saving, as the timezone
+        setenv("TZ", "GMT0", 1);
+        tzset();
 
         // Initialise tasking, FGR style
         if (err == ESP_OK) {
@@ -4191,8 +4247,7 @@ static int32_t init(context_t *context)
                         int32_t height_mm = microsteps_to_mm(microsteps) - retained_ram.ground_level_mm;
 
                         ESP_LOGI(TAG, "warm start (height %d mm, %d microsteps, %s).",
-                                (int) height_mm,
-                                (int) microsteps,
+                                (int) height_mm, (int) microsteps,
                                 retained_ram.emergency_stopped ? "EMERGENCY STOPPED" : "not emergency stopped");
 
                         if (!retained_ram.emergency_stopped) {
@@ -4289,7 +4344,15 @@ static int32_t init(context_t *context)
                                                                                context, DISPLAY_COUNTDOWN_PRIORITY,
                                                                                500, "countdown");
                         if (context->display_source_countdown) {
-                            err = ESP_OK;
+                            // Add an information display callback: long refresh time since it
+                            // does not update often
+                            context->display_source_information = display_source_add(context->display,
+                                                                                     display_information_cb,
+                                                                                     context, DISPLAY_INFORMATION_PRIORITY,
+                                                                                     60000, "info");
+                            if (context->display_source_information) {
+                                err = ESP_OK;
+                            }
                         }
                     }
                 } else {
@@ -4334,7 +4397,7 @@ static int32_t init(context_t *context)
 
         if (err == ESP_OK) {
             // Stuff needed for automatic mode
-            err = fgr_task_create(&auto_cb, launcher, "auto", 4096, 3, &launcher->task_auto);
+            err = fgr_task_create(&auto_cb, context, "auto", 4096, 3, &launcher->task_auto);
         }
 
         if (err == ESP_OK) {
