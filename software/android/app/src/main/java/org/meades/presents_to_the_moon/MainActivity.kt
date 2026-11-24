@@ -1222,25 +1222,6 @@ fun MainScreen(
         Spacer(modifier = Modifier.height(4.dp))
 
         ExpandablePeriodSection(
-            title = "Off-Peak",
-            enableLabel = "Off-Peak Enable",
-            enabledValue = offPeakEnable,
-            startSecValue = offPeakStartSec,
-            durationSecValue = offPeakDurationSec,
-            intervalSecValue = offPeakLaunchIntervalSec,
-            isConnected = isConnected,
-            isExpanded = offPeakExpanded,
-            onExpandedChange = { offPeakExpanded = it },
-            onToggleEnable = { onSendValueCommand("OFF_PEAK", it) },
-            onSaveStartSec = { onSendValueCommand("OFF_PEAK_START_SECONDS_SINCE_MIDNIGHT", it) },
-            onSaveDurationSec = { onSendValueCommand("OFF_PEAK_DURATION_SECONDS", it) },
-            onSaveIntervalSec = { onSendValueCommand("OFF_PEAK_LAUNCH_INTERVAL_SECONDS", it) },
-            confirmAndExecute = ::confirmAndExecute
-        )
-
-        HorizontalDivider(modifier = Modifier.padding(vertical = 2.dp), thickness = 0.5.dp)
-
-        ExpandablePeriodSection(
             title = "Peak",
             enableLabel = "Peak Enable",
             enabledValue = peakEnable,
@@ -1254,6 +1235,25 @@ fun MainScreen(
             onSaveStartSec = { onSendValueCommand("PEAK_START_SECONDS_SINCE_MIDNIGHT", it) },
             onSaveDurationSec = { onSendValueCommand("PEAK_DURATION_SECONDS", it) },
             onSaveIntervalSec = { onSendValueCommand("PEAK_LAUNCH_INTERVAL_SECONDS", it) },
+            confirmAndExecute = ::confirmAndExecute
+        )
+
+        HorizontalDivider(modifier = Modifier.padding(vertical = 2.dp), thickness = 0.5.dp)
+
+        ExpandablePeriodSection(
+            title = "Off-Peak",
+            enableLabel = "Off-Peak Enable",
+            enabledValue = offPeakEnable,
+            startSecValue = offPeakStartSec,
+            durationSecValue = offPeakDurationSec,
+            intervalSecValue = offPeakLaunchIntervalSec,
+            isConnected = isConnected,
+            isExpanded = offPeakExpanded,
+            onExpandedChange = { offPeakExpanded = it },
+            onToggleEnable = { onSendValueCommand("OFF_PEAK", it) },
+            onSaveStartSec = { onSendValueCommand("OFF_PEAK_START_SECONDS_SINCE_MIDNIGHT", it) },
+            onSaveDurationSec = { onSendValueCommand("OFF_PEAK_DURATION_SECONDS", it) },
+            onSaveIntervalSec = { onSendValueCommand("OFF_PEAK_LAUNCH_INTERVAL_SECONDS", it) },
             confirmAndExecute = ::confirmAndExecute
         )
 
