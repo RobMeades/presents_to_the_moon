@@ -440,7 +440,7 @@ typedef struct {
     activity_period_t off_peak;
     activity_period_t peak;
     launcher_timer_t timer_auto;
-    int32_t auto_period_seconds;
+    int32_t auto_period_override_seconds;
     time_t pending_t0;
     time_t t0;
     nvs_shadow_t nvs_shadow;
@@ -1699,6 +1699,15 @@ static bool auto_is_active(int32_t possible_t0_seconds_since_midnight,
     return active;
 }
 
+// Return the time to the next launch in seconds
+static time_t auto_seconds_to_next_launch(time_t midnight, time_t now,
+                                          int32_t launch_interval_seconds)
+{
+    time_t next_launch = midnight + ((now - midnight + launch_interval_seconds - 1)
+                          / launch_interval_seconds) * launch_interval_seconds;
+    return next_launch - now;
+}
+
 // Handle the auto timer.
 static bool auto_timer_has_expired(launcher_t *launcher)
 {
@@ -1722,52 +1731,62 @@ static bool auto_timer_has_expired(launcher_t *launcher)
         time_t midnight = mktime(&timeinfo);
 
         // Work out if we are in a period of automatic activity
-        int32_t launch_interval_seconds = 0;
+        int32_t this_launch_interval_seconds = 0;
         time_t start_time[] = {NO_COUNTDOWN, NO_COUNTDOWN};
+        int32_t launch_interval_seconds[] = {0, 0};
         int32_t offset_seconds = t0_offset(launcher);
         time_t possible_t0_seconds_since_midnight = seconds_since_midnight + offset_seconds;
         if (nvs_shadow->off_peak_enabled) {
             start_time[0] = nvs_shadow->off_peak_start_seconds_since_midnight + midnight;
+            launch_interval_seconds[0] = nvs_shadow->off_peak_launch_interval_seconds;
             if (auto_is_active(possible_t0_seconds_since_midnight,
                                nvs_shadow->off_peak_start_seconds_since_midnight,
                                nvs_shadow->off_peak_duration_seconds)) {
                 // Inside the off-peak launch period
-                launch_interval_seconds = nvs_shadow->off_peak_launch_interval_seconds;
+                this_launch_interval_seconds = nvs_shadow->off_peak_launch_interval_seconds;
                 t0 = possible_t0_seconds_since_midnight + midnight;
             }
         }
         if (nvs_shadow->peak_enabled) {
             start_time[1] = nvs_shadow->peak_start_seconds_since_midnight + midnight;
+            launch_interval_seconds[1] = nvs_shadow->off_peak_launch_interval_seconds;
             if (auto_is_active(possible_t0_seconds_since_midnight,
                                nvs_shadow->peak_start_seconds_since_midnight,
                                nvs_shadow->peak_duration_seconds)) {
                 // Peak trumps off-peak
-                launch_interval_seconds = nvs_shadow->peak_launch_interval_seconds;
+                this_launch_interval_seconds = nvs_shadow->peak_launch_interval_seconds;
                 t0 = possible_t0_seconds_since_midnight + midnight;
             }
         }
 
-        if (launch_interval_seconds > 0) {
+        if (this_launch_interval_seconds > 0) {
             // Our possible T0 is inside an activity period, check/set the auto timer
-            launcher->auto_period_seconds = launch_interval_seconds;
-            if (launcher->timer_auto.duration_us == 0) {
-                // No timer was set, must be the first time into an active period, let's go...
-                has_expired = true;
-                // Update T0 directly in case this is the first time ever
-                __atomic_store_n(&launcher->t0, t0, __ATOMIC_RELAXED);
+            if (launcher->auto_period_override_seconds > 0) {
+                // We failed to launch previously and are retrying after a short interval
+                timer_start_us(&launcher->timer_auto, launcher->auto_period_override_seconds * 1000000);
+                launcher->auto_period_override_seconds = 0;
             } else {
-                //  Timer was already set, see if it has expired
-                has_expired = timer_has_expired(&launcher->timer_auto);
-                if (!has_expired) {
-                    t0 += timer_remaining_us(&launcher->timer_auto) / 1000000;
+                // Normal case
+                if (launcher->timer_auto.duration_us == 0) {
+                    // No timer was set, must be the first time into an active period
+                    // Calculate the next launch time aligned with the hour
+                    time_t next_time = auto_seconds_to_next_launch(midnight, now, this_launch_interval_seconds);
+                    timer_start_us(&launcher->timer_auto, next_time * 1000000);
+                    // Update T0 directly as the state machine will not be running yet
+                    __atomic_store_n(&launcher->t0, t0, __ATOMIC_RELAXED);
                 }
             }
-            if ((launcher->timer_auto.duration_us == 0) || has_expired) {
-                // No timer was set or it has expired, set a new timeout
+            has_expired = timer_has_expired(&launcher->timer_auto);
+            if (has_expired) {
+                // Timer has expired, set a new timeout
                 // (it will be cancelled next time we come in here if we
                 // have gone beyond the end of an activity period)
-                timer_start_us(&launcher->timer_auto, ((int64_t) launch_interval_seconds) * 1000000);
-                t0 += launch_interval_seconds;
+                // Calculate the next launch time alignend with the hour
+                time_t next_time = auto_seconds_to_next_launch(midnight, now, this_launch_interval_seconds);
+                timer_start_us(&launcher->timer_auto, next_time * 1000000);
+                t0 += next_time;
+            } else {
+                t0 += timer_remaining_us(&launcher->timer_auto) / 1000000;
             }
         } else {
             // Not in an activity period, set the auto timer duration
@@ -1778,18 +1797,28 @@ static bool auto_timer_has_expired(launcher_t *launcher)
         if (t0 == NO_COUNTDOWN) {
             // Not in an active period at the moment: set the
             // T0 to when the next one will start
-            time_t _start_time = start_time[0];
-            if ((_start_time == NO_COUNTDOWN) || (start_time[1] < _start_time)) {
-                _start_time = start_time[1];
+            for (size_t x = 0; x < FGR_UTIL_ARRAY_LENGTH(start_time); x++) {
+                if (start_time[x] != NO_COUNTDOWN) {
+                    if (start_time[x] < now) {
+                        // Move to tomorrow if necessary
+                        start_time[x] += 24 * 60 * 60;
+                    }
+                    // Add on the number of seconds into the window that T0 would occur
+                    start_time[x] += auto_seconds_to_next_launch(midnight, start_time[x], launch_interval_seconds[x]) + offset_seconds;
+                }
             }
-            if (_start_time != NO_COUNTDOWN) {
-                t0 = _start_time + offset_seconds;
+            // Pick the smallest
+            t0 = start_time[0];
+            if ((t0 == NO_COUNTDOWN) || (start_time[1] < t0)) {
+                t0 = start_time[1];
             }
+            // Update T0 directly as the state machine will not be running in this case
+            __atomic_store_n(&launcher->t0, t0, __ATOMIC_RELAXED);
+        } else {
+            // Update the pending T0 - it will be moved to T0
+            // by the state machine
+            __atomic_store_n(&launcher->pending_t0, t0, __ATOMIC_RELAXED);
         }
-
-        // Update the pending T0 - it will be moved to T0
-        // by the state machine
-        __atomic_store_n(&launcher->pending_t0, t0, __ATOMIC_RELAXED);
     }
 
     return has_expired;
@@ -1805,17 +1834,15 @@ static void auto_cb(void *handle, void *arg)
     if (auto_timer_has_expired(launcher)) {
         if (launcher->state == LAUNCHER_STATE_READY) {
             // Start the next run
+            launcher->auto_period_override_seconds = 0;
             launcher_state_t state = LAUNCHER_STATE_RUN;
             xQueueSend(launcher->queue_state, &state, portMAX_DELAY);
-            ESP_LOGI(TAG, "### Auto mode timer expired (next expiry in %d second(s)) ###",
-                     launcher->auto_period_seconds);
+            ESP_LOGI(TAG, "### Auto mode timer expired ###");
         } else {
             // Couldn't start, try again in a shorter time
-            launcher->auto_period_seconds = AUTO_MODE_RETRY_TIME_SECONDS;
-            time_t t0 = __atomic_load_n(&launcher->t0, __ATOMIC_RELAXED);
-            __atomic_store_n(&launcher->t0, t0 - AUTO_MODE_RETRY_TIME_SECONDS, __ATOMIC_RELAXED);
+            launcher->auto_period_override_seconds = AUTO_MODE_RETRY_TIME_SECONDS;
             ESP_LOGI(TAG, "unable to auto-run in state %s, retrying in %d second(s).",
-                     g_launcher_state_name[launcher->state], launcher->auto_period_seconds);
+                     g_launcher_state_name[launcher->state], launcher->auto_period_override_seconds);
         }
     }
 
@@ -2523,8 +2550,7 @@ static void handler_this_is_height_max(launcher_t *launcher, uint64_t unused, bo
             int32_t height_mm = microsteps_to_mm(microsteps);
             if ((height_mm < POSITION_UNKNOWN) && (height_mm > retained_ram.ground_level_mm)) {
                 // Set the "height max" value in NVS
-                nvs_height_max_mm_set(nvs_shadow,
-                                    (height_mm - retained_ram.ground_level_mm));
+                nvs_height_max_mm_set(nvs_shadow, (height_mm - retained_ram.ground_level_mm));
             } else {
                 ESP_LOGW(TAG, "not setting height max, height returned by TMC5160()"
                          " (%d mm, %d microsteps, with ground at %d mm) out of range.",
@@ -2621,10 +2647,8 @@ static void handler_off_peak_enable(launcher_t *launcher, uint64_t enable, bool 
     if (!read_not_write) {
         // Write the new setting to NVS
         nvs_off_peak_enable_set(&launcher->nvs_shadow, enable ? true : false);
-        if (enable) {
-            // Reset the auto timer so that it gets recalculated
-            auto_timer_reset(launcher);
-        }
+        // Reset the auto timer so that it gets recalculated
+        auto_timer_reset(launcher);
     }
 }
 
@@ -2667,10 +2691,8 @@ static void handler_peak_enable(launcher_t *launcher, uint64_t enable, bool read
     if (!read_not_write) {
         // Write the new setting to NVS
         nvs_peak_enable_set(&launcher->nvs_shadow, enable ? true : false);
-        if (enable) {
-            // Reset the auto timer so that it gets recalculated
-            auto_timer_reset(launcher);
-        }
+        // Reset the auto timer so that it gets recalculated
+        auto_timer_reset(launcher);
     }
 }
 
@@ -4022,6 +4044,26 @@ static int32_t init(context_t *context)
             err = fgr_task_init();
         }
 
+        // Configure WS2812 LED operations needed for debug, FGR style
+        if (err == ESP_OK) {
+            err = fgr_ws2812_init();
+        }
+
+        // Initialize NVS, FGR style
+        if (err == ESP_OK) {
+            err = fgr_nvs_init();
+        }
+
+        // Configure the debug LED, FGR style
+        if (err == ESP_OK) {
+            err = fgr_debug_init();
+        }
+
+        // Make sure that NVS is populated (in case it is blank)
+        if (err == ESP_OK) {
+            nvs_populate(nvs_shadow);
+        }
+
         // Initialise the TMC5160 stepper motor controller
         if (err == ESP_OK) {
             err = tmc5160_init(CONFIG_TMC5160_SPI_NUM, CONFIG_TMC5160_SPI_SCK_PIN,
@@ -4140,8 +4182,7 @@ static int32_t init(context_t *context)
 
                 // Attempt warm-start recovery only if the TMC5160 has
                 // not reset and we have a known ground reference.
-                if (!reset_detected &&
-                    (ack_err == ESP_OK) &&
+                if (!reset_detected && (ack_err == ESP_OK) &&
                     (retained_ram.ground_level_mm != POSITION_UNKNOWN)) {
 
                     int32_t microsteps = 0;
@@ -4194,26 +4235,6 @@ static int32_t init(context_t *context)
         gpio_set_level(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_3, 1);
         gpio_set_direction(CONFIG_PRESENTS_TO_THE_MOON_AUDIO_PIN_3, GPIO_MODE_OUTPUT);
 #endif
-
-        // Configure WS2812 LED operations needed for debug, FGR style
-        if (err == ESP_OK) {
-            err = fgr_ws2812_init();
-        }
-
-        // Initialize NVS, FGR style
-        if (err == ESP_OK) {
-            err = fgr_nvs_init();
-        }
-
-        // Configure the debug LED, FGR style
-        if (err == ESP_OK) {
-            err = fgr_debug_init();
-        }
-
-        // Make sure that NVS is populated (in case it is blank)
-        if (err == ESP_OK) {
-            nvs_populate(nvs_shadow);
-        }
 
         // Initialise the HT16K33A countdown display
         if (err == ESP_OK) {
