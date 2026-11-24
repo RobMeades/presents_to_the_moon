@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <inttypes.h>
+#include <stdatomic.h>
 #include "esp_err.h"
 #include "esp_log_level.h"
 #include "esp_timer.h"
@@ -79,6 +80,12 @@
 
 // Priority for displaying the clock (low)
 #define DISPLAY_CLOCK_PRIORITY 10
+
+// Priority for displaying the countdown (higher)
+#define DISPLAY_COUNTDOWN_PRIORITY 5
+
+// An out of range time_t value to represent countdown not in use
+#define NO_COUNTDOWN INT64_MAX
 
 // How many seconds to wait for time synchronisation
 #define TIME_SYNC_WAIT_SECONDS 30
@@ -152,11 +159,29 @@
 // Service UUID for launcher control.
 #define SERVICE_UUID 0xFFE0
 
-// The name for the "auto enable" entry in non-volatile storage.
-#define NVS_NAME_AUTO_ENABLE "auto_enabled"
+// The name of off-peak enable.
+#define NVS_NAME_OFF_PEAK_ENABLE "op_enable"
 
-// The name for the "auto period" entry in non-volatile storage.
-#define NVS_NAME_AUTO_PERIOD_SECONDS "auto_period_sec"
+// The name of the start time of off-peak.
+#define NVS_NAME_OFF_PEAK_START_SECONDS_SINCE_MIDNIGHT "op_start_sec"
+
+// The name of the duration of off-peak.
+#define NVS_NAME_OFF_PEAK_DURATION_SECONDS "op_length_sec"
+
+// The name of the launch interval during off-peak.
+#define NVS_NAME_OFF_PEAK_LAUNCH_INTERVAL_SECONDS "op_interval_sec"
+
+// The name of peak time enable.
+#define NVS_NAME_PEAK_ENABLE "p_enable"
+
+// The name of the start time of peak time.
+#define NVS_NAME_PEAK_START_SECONDS_SINCE_MIDNIGHT "p_start_sec"
+
+// The name of the duration of peak time.
+#define NVS_NAME_PEAK_DURATION_SECONDS "p_length_sec"
+
+// The name of the launch interval during peak time.
+#define NVS_NAME_PEAK_LAUNCH_INTERVAL_SECONDS "p_interval_sec"
 
 // The name for the "height max" entry in non-volatile storage.
 #define NVS_NAME_HEIGHT_MAX_MM "height_max_mm"
@@ -184,11 +209,29 @@
 // The name for the "mute" entry in non-volatile storage.
 #define NVS_NAME_MUTE "mute"
 
-// Default value for "auto enable".
-#define DEFAULT_AUTO_ENABLE false
+// Default value for off-peak enable.
+#define DEFAULT_OFF_PEAK_ENABLE false
 
-// Default value for "auto period".
-#define DEFAULT_AUTO_PERIOD_SECONDS 120
+// Default value for off-peak start in seconds since midnight.
+#define DEFAULT_OFF_PEAK_START_SECONDS_SINCE_MIDNIGHT (10 * 60 * 60)
+
+// Default value for off-peak duration in seconds.
+#define DEFAULT_OFF_PEAK_DURATION_SECONDS (8 * 60 * 60)
+
+// Default value for the launch interval during off-peak in seconds.
+#define DEFAULT_OFF_PEAK_LAUNCH_INTERVAL_SECONDS (15 * 60)
+
+// Default value for peak-time enable.
+#define DEFAULT_PEAK_ENABLE true
+
+// Default value for the start of peak time in seconds since midnight.
+#define DEFAULT_PEAK_START_SECONDS_SINCE_MIDNIGHT (15 * 60 * 60)
+
+// Default value for the duration of peak time in seconds.
+#define DEFAULT_PEAK_DURATION_SECONDS (2 * 60 * 60)
+
+// Default value for the launch interval during peak time in seconds.
+#define DEFAULT_PEAK_LAUNCH_INTERVAL_SECONDS (2 * 60)
 
 // Default value for "height max"(just under the minimum pole height).
 #define DEFAULT_HEIGHT_MAX_MM 1500
@@ -243,7 +286,7 @@
 #define IGNITION_SETTLE_TIME_MS 0
 
 // How long to dangle after launch.
-#define DANGLE_TIME_SECONDS 4
+#define DANGLE_TIME_SECONDS 12
 
 // Percentage speed reduction when resetting.
 #define RESETTING_SPEED_MODIFIER_PERCENT 75
@@ -293,25 +336,31 @@ typedef enum {
 // If you modify this enum, you will need to modify
 // g_command_data_list[] to match.
 typedef enum {
-    COMMAND_LAUNCH_NOW,              // write only, has no value
-    COMMAND_UP,                      // write only, Boolean
-    COMMAND_DOWN,                    // write only, Boolean
-    COMMAND_THIS_IS_GROUND_LEVEL,    // write only, has no value
-    COMMAND_THIS_IS_HEIGHT_MAX,      // write only, has no value
-    COMMAND_RESET_TO_DEFAULTS,       // write only, has no value
-    COMMAND_EMERGENCY_STOP_ENABLE,   // read/write, Boolean
-    COMMAND_PLAY_TRACK,              // write only, uint32_t
-    COMMAND_AUTO_ENABLE,             // read/write, Boolean
-    COMMAND_AUTO_PERIOD_SECONDS,     // read/write, uint32_t
-    COMMAND_HEIGHT_MAX_MM,           // read/write, uint32_t
-    COMMAND_SPEED_MM_PER_SECOND,     // read/write, uint32_t
-    COMMAND_TRACK_NUMBER_DELUGE,     // read/write, uint32_t
-    COMMAND_TRACK_NUMBER_LAUNCHING,  // read/write, uint32_t
-    COMMAND_TRACK_NUMBER_DANGLING,   // read/write, uint32_t
-    COMMAND_TRACK_NUMBER_RESETTING,  // read/write, uint32_t
-    COMMAND_MUTE,                    // read/write, Boolean
-    COMMAND_STATE,                   // read only, uint32_t
-    COMMAND_HEIGHT_CURRENT_MM,       // read only, uint32_t
+    COMMAND_LAUNCH_NOW,                            // write only, has no value
+    COMMAND_UP,                                    // write only, Boolean
+    COMMAND_DOWN,                                  // write only, Boolean
+    COMMAND_THIS_IS_GROUND_LEVEL,                  // write only, has no value
+    COMMAND_THIS_IS_HEIGHT_MAX,                    // write only, has no value
+    COMMAND_RESET_TO_DEFAULTS,                     // write only, has no value
+    COMMAND_EMERGENCY_STOP_ENABLE,                 // read/write, Boolean
+    COMMAND_PLAY_TRACK,                            // write only, uint32_t
+    COMMAND_OFF_PEAK_ENABLE,                       // read/write, Boolean
+    COMMAND_OFF_PEAK_START_SECONDS_SINCE_MIDNIGHT, // read/write, uint32_t
+    COMMAND_OFF_PEAK_DURATION_SECONDS,             // read/write, uint32_t
+    COMMAND_OFF_PEAK_LAUNCH_INTERVAL_SECONDS,      // read/write, uint32_t
+    COMMAND_PEAK_ENABLE,                           // read/write, Boolean
+    COMMAND_PEAK_START_SECONDS_SINCE_MIDNIGHT,     // read/write, uint32_t
+    COMMAND_PEAK_DURATION_SECONDS,                 // read/write, uint32_t
+    COMMAND_PEAK_LAUNCH_INTERVAL_SECONDS,          // read/write, uint32_t
+    COMMAND_HEIGHT_MAX_MM,                         // read/write, uint32_t
+    COMMAND_SPEED_MM_PER_SECOND,                   // read/write, uint32_t
+    COMMAND_TRACK_NUMBER_DELUGE,                   // read/write, uint32_t
+    COMMAND_TRACK_NUMBER_LAUNCHING,                // read/write, uint32_t
+    COMMAND_TRACK_NUMBER_DANGLING,                 // read/write, uint32_t
+    COMMAND_TRACK_NUMBER_RESETTING,                // read/write, uint32_t
+    COMMAND_MUTE,                                  // read/write, Boolean
+    COMMAND_STATE,                                 // read only, uint32_t
+    COMMAND_HEIGHT_CURRENT_MM,                     // read only, uint32_t
     COMMAND_NUMBER_OF
 } command_t;
 
@@ -335,11 +384,17 @@ typedef enum {
 } launcher_state_t;
 
 // Shadow structure for NVS items: since BLE
-// _also_ write to NVS, trying to avoid
+// _also_ writes to NVS, trying to avoid
 // accessing it is a good thing to reduce contention.
 typedef struct {
-   bool auto_enabled;
-   uint32_t auto_period_seconds;
+   bool off_peak_enabled;
+   uint32_t off_peak_start_seconds_since_midnight;
+   uint32_t off_peak_duration_seconds;
+   uint32_t off_peak_launch_interval_seconds;
+   bool peak_enabled;
+   uint32_t peak_start_seconds_since_midnight;
+   uint32_t peak_duration_seconds;
+   uint32_t peak_launch_interval_seconds;
    uint32_t height_max_mm;
    uint32_t speed_mm_per_second;
    uint32_t track_number_deluge;
@@ -361,6 +416,13 @@ typedef struct {
     uint32_t last_current_setting_ma;
 } launcher_motor_t;
 
+// Structure that defines an activity period
+typedef struct {
+    time_t start_seconds_since_midnight;
+    time_t duration_seconds;
+    time_t launch_interval_seconds;
+} activity_period_t;
+
 // The launcher context
 typedef struct {
     QueueHandle_t queue_state;
@@ -373,8 +435,11 @@ typedef struct {
     bool temporary_stop;
     uint32_t ignition_cycles_completed;
     TaskHandle_t task_auto;
-    uint32_t auto_period_seconds;
+    activity_period_t off_peak;
+    activity_period_t peak;
     launcher_timer_t timer_auto;
+    int32_t auto_period_seconds;
+    time_t next_t0;
     nvs_shadow_t nvs_shadow;
     launcher_motor_t motor;
 } launcher_t;
@@ -386,6 +451,7 @@ typedef struct {
     TaskHandle_t command_task;
     display_t *display;
     display_source_t *display_source_clock;
+    display_source_t *display_source_countdown;
     ble_uuid16_t service_uuid;
     struct ble_hs_adv_fields ble_adv_fields;
     uint16_t ble_connection_handle;
@@ -441,7 +507,8 @@ static const struct ble_gap_adv_params g_ble_adv_params = {
 // Context for the whole application (fields not mentioned will be zeroed).
 static context_t g_context = {.service_uuid = BLE_UUID16_INIT(SERVICE_UUID),
                               .ble_connection_handle = BLE_HS_CONN_HANDLE_NONE,
-                              .launcher.height_target_mm = POSITION_UNKNOWN};
+                              .launcher.height_target_mm = POSITION_UNKNOWN,
+                              .launcher.next_t0 = NO_COUNTDOWN};
 
 // Retained RAM storage
 FGR_RRAM_DEFINE(retained_ram_t, retained_ram);
@@ -480,8 +547,8 @@ static const fgr_ws2812_colour_t g_launcher_state_colour[] = {FGR_WS2812_LED_COL
                                                               FGR_WS2812_LED_COLOUR_MAGENTA,    // RUNNING_IGNITION
                                                               FGR_WS2812_LED_COLOUR_MAGENTA,    // RUNNING_LAUNCHING
                                                               FGR_WS2812_LED_COLOUR_MAGENTA,    // RUNNING_DANGLING
-                                                              FGR_WS2812_LED_COLOUR_MAGENTA,    // RUNNING_RESETTING
-                                                              FGR_WS2812_LED_COLOUR_NONE};      // HALT
+                                                              FGR_WS2812_LED_COLOUR_MAGENTA,   // RUNNING_RESETTING
+                                                              FGR_WS2812_LED_COLOUR_NONE};     // HALT
 
 // Do some checking
 _Static_assert (FGR_UTIL_ARRAY_LENGTH(g_launcher_state_colour) == LAUNCHER_STATE_NUMBER_OF,
@@ -490,22 +557,25 @@ _Static_assert (FGR_UTIL_ARRAY_LENGTH(g_launcher_state_colour) == LAUNCHER_STATE
 
 // The durations of the known audio tracks, in order of track number
 // noting that 0 is unused
-static const uint32_t g_track_duration_ms[] = {0, 1000, 1000, 1000,
+static const uint32_t g_track_duration_ms[] = {0, 7160, 17240, 8340,
                                                14000, 10000, 1000, 1000,
                                                1000, 1000};
 
 // THERE ARE MORE VARIABLES FURTHER DOWN
 
 /* ----------------------------------------------------------------
- * STATIC FUNCTIONS: MISC
+ * STATIC FUNCTIONS: DISPLAY RELATED
  * -------------------------------------------------------------- */
 
 // Callback to display the clock.
-static bool display_clock_cb (char *buffer, size_t buffer_size, void *user_data)
+static bool display_clock_cb(char *buffer, size_t buffer_size, void *user_data)
 {
     (void) user_data;
 
-    if (buffer && (buffer_size >= 8 + 1)) {
+    // 10 rather than 8 below as the decimal points are separate characters
+    // here (they will just light the decimal point segment of a 14-segment
+    // thingy when they get to the display)
+    if (buffer && (buffer_size >= 10 + 1)) {
         time_t now;
         struct tm timeinfo;
 
@@ -517,65 +587,286 @@ static bool display_clock_cb (char *buffer, size_t buffer_size, void *user_data)
     return true;
 }
 
+// Format a duration (in whole seconds, int32_t) as "T-HH:MM:SS".
+//   - Sign is '-' for negative durations, '+' for positive and zero.
+//   - Hours are total hours (not modulo 24), zero-padded to at least 2 digits.
+//   - Minutes and seconds always two digits.
+static char *format_duration(time_t seconds, char *buffer, size_t length)
+{
+    char *result = buffer;
+
+    if (buffer && (length > 0)) {
+
+        uint32_t abs_seconds = (seconds < 0) ? (uint32_t) (-(int64_t) seconds) : (uint32_t) seconds;
+        bool negative = (seconds < 0);
+        uint32_t hours = abs_seconds / 3600U;
+        uint32_t minutes = (abs_seconds % 3600U) / 60U;
+        uint32_t seconds = abs_seconds % 60U;
+        int32_t _length = snprintf(buffer, length, "T%c%02lu:%02lu:%02lu",
+                                   negative ? '-' : '+', (unsigned long) hours,
+                                   (unsigned long) minutes, (unsigned long) seconds);
+        if ((_length < 0) || ((size_t) _length >= length)) {
+            result = NULL;
+        }
+    }
+
+    return result;
+}
+
+// Callback to display the countdown.
+static bool display_countdown_cb(char *buffer, size_t buffer_size, void *user_data)
+{
+    bool counting_down = false;
+    context_t *context = (context_t *) user_data;
+    launcher_t *launcher = &context->launcher;
+
+    time_t next_t0 = __atomic_load_n(&launcher->next_t0, __ATOMIC_RELAXED);
+    if (next_t0 != NO_COUNTDOWN) {
+        time_t now;
+        time(&now);
+        if (format_duration(now - next_t0, buffer, buffer_size) != NULL) {
+            counting_down = true;
+        }
+    }
+
+    return counting_down;
+}
+
 /* ----------------------------------------------------------------
  * STATIC FUNCTIONS: NVS RELATED
  * -------------------------------------------------------------- */
 
-// Retrieve whether auto is enabled or not from NVS;
+// Retrieve whether off-peak is enabled or not from NVS;
 // this is guaranteed to return a useful answer, even on error.
-static int32_t nvs_auto_enable_get(bool *enable)
+static int32_t nvs_off_peak_enable_get(bool *enable)
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
     uint32_t value = 0;
 
     if (enable) {
-        err = fgr_nvs_get(NVS_NAME_AUTO_ENABLE, &value);
+        err = fgr_nvs_get(NVS_NAME_OFF_PEAK_ENABLE, &value);
         if (err == ESP_OK) {
             *enable = (value != 0);
         } else {
-            *enable = DEFAULT_AUTO_ENABLE;
+            *enable = DEFAULT_OFF_PEAK_ENABLE;
         }
     }
 
     return err;
 }
 
-// Set whether auto is enabled or not in NVS.
-static int32_t nvs_auto_enable_set(nvs_shadow_t *nvs_shadow, bool enable)
+// Set whether off-peak is enabled or not in NVS.
+static int32_t nvs_off_peak_enable_set(nvs_shadow_t *nvs_shadow, bool enable)
 {
-    int32_t err = fgr_nvs_set(NVS_NAME_AUTO_ENABLE, enable);
+    int32_t err = fgr_nvs_set(NVS_NAME_OFF_PEAK_ENABLE, enable);
 
     if ((err == ESP_OK) && nvs_shadow) {
-        nvs_shadow->auto_enabled = enable;
+        nvs_shadow->off_peak_enabled = enable;
     }
 
     return err;
 }
 
-// Retrieve the auto period from NVS;
+// Retrieve the off-peak start time in seconds since midnight from NVS;
 // this is guaranteed to return a useful answer, even on error.
-static int32_t nvs_auto_period_seconds_get(uint32_t *auto_period_seconds)
+static int32_t nvs_off_peak_start_seconds_since_midnight_get(uint32_t *start_seconds_since_midnight)
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
 
-    if (auto_period_seconds) {
-        err = fgr_nvs_get(NVS_NAME_AUTO_PERIOD_SECONDS, auto_period_seconds);
+    if (start_seconds_since_midnight) {
+        err = fgr_nvs_get(NVS_NAME_OFF_PEAK_START_SECONDS_SINCE_MIDNIGHT, start_seconds_since_midnight);
         if (err != ESP_OK) {
-            *auto_period_seconds = DEFAULT_AUTO_PERIOD_SECONDS;
+            *start_seconds_since_midnight = DEFAULT_OFF_PEAK_START_SECONDS_SINCE_MIDNIGHT;
         }
     }
 
     return err;
 }
 
-// Set the auto period in NVS.
-static int32_t nvs_auto_period_seconds_set(nvs_shadow_t *nvs_shadow,
-                                           uint32_t auto_period_seconds)
+// Set the off-peak start time in NVS.
+static int32_t nvs_off_peak_start_seconds_since_midnight_set(nvs_shadow_t *nvs_shadow,
+                                                             uint32_t start_seconds_since_midnight)
 {
-    int32_t err = fgr_nvs_set(NVS_NAME_AUTO_PERIOD_SECONDS, auto_period_seconds);
+    int32_t err = fgr_nvs_set(NVS_NAME_OFF_PEAK_START_SECONDS_SINCE_MIDNIGHT, start_seconds_since_midnight);
 
     if ((err == ESP_OK) && nvs_shadow) {
-        nvs_shadow->auto_period_seconds = auto_period_seconds;
+        nvs_shadow->off_peak_start_seconds_since_midnight = start_seconds_since_midnight;
+    }
+
+    return err;
+}
+
+// Retrieve the off-peak duration in seconds from NVS;
+// this is guaranteed to return a useful answer, even on error.
+static int32_t nvs_off_peak_duration_seconds_get(uint32_t *duration_seconds)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+
+    if (duration_seconds) {
+        err = fgr_nvs_get(NVS_NAME_OFF_PEAK_DURATION_SECONDS, duration_seconds);
+        if (err != ESP_OK) {
+            *duration_seconds = DEFAULT_OFF_PEAK_DURATION_SECONDS;
+        }
+    }
+
+    return err;
+}
+
+// Set the off-peak duration in NVS.
+static int32_t nvs_off_peak_duration_seconds_set(nvs_shadow_t *nvs_shadow,
+                                                 uint32_t duration_seconds)
+{
+    int32_t err = fgr_nvs_set(NVS_NAME_OFF_PEAK_DURATION_SECONDS, duration_seconds);
+
+    if ((err == ESP_OK) && nvs_shadow) {
+        nvs_shadow->off_peak_duration_seconds = duration_seconds;
+    }
+
+    return err;
+}
+
+// Retrieve the launch interval during off-peak in seconds from NVS;
+// this is guaranteed to return a useful answer, even on error.
+static int32_t nvs_off_peak_launch_interval_seconds_get(uint32_t *interval_seconds)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+
+    if (interval_seconds) {
+        err = fgr_nvs_get(NVS_NAME_OFF_PEAK_LAUNCH_INTERVAL_SECONDS, interval_seconds);
+        if (err != ESP_OK) {
+            *interval_seconds = DEFAULT_OFF_PEAK_LAUNCH_INTERVAL_SECONDS;
+        }
+    }
+
+    return err;
+}
+
+// Set the off-peak launch intreval in NVS.
+static int32_t nvs_off_peak_launch_interval_seconds_set(nvs_shadow_t *nvs_shadow,
+                                                        uint32_t interval_seconds)
+{
+    int32_t err = fgr_nvs_set(NVS_NAME_OFF_PEAK_LAUNCH_INTERVAL_SECONDS, interval_seconds);
+
+    if ((err == ESP_OK) && nvs_shadow) {
+        nvs_shadow->off_peak_launch_interval_seconds = interval_seconds;
+    }
+
+    return err;
+}
+
+// Retrieve whether peak time is enabled or not from NVS;
+// this is guaranteed to return a useful answer, even on error.
+static int32_t nvs_peak_enable_get(bool *enable)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+    uint32_t value = 0;
+
+    if (enable) {
+        err = fgr_nvs_get(NVS_NAME_PEAK_ENABLE, &value);
+        if (err == ESP_OK) {
+            *enable = (value != 0);
+        } else {
+            *enable = DEFAULT_PEAK_ENABLE;
+        }
+    }
+
+    return err;
+}
+
+// Set whether peak time is enabled or not in NVS.
+static int32_t nvs_peak_enable_set(nvs_shadow_t *nvs_shadow, bool enable)
+{
+    int32_t err = fgr_nvs_set(NVS_NAME_PEAK_ENABLE, enable);
+
+    if ((err == ESP_OK) && nvs_shadow) {
+        nvs_shadow->peak_enabled = enable;
+    }
+
+    return err;
+}
+
+// Retrieve the start of peak time time in seconds since midnight from NVS;
+// this is guaranteed to return a useful answer, even on error.
+static int32_t nvs_peak_start_seconds_since_midnight_get(uint32_t *start_seconds_since_midnight)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+
+    if (start_seconds_since_midnight) {
+        err = fgr_nvs_get(NVS_NAME_PEAK_START_SECONDS_SINCE_MIDNIGHT, start_seconds_since_midnight);
+        if (err != ESP_OK) {
+            *start_seconds_since_midnight = DEFAULT_PEAK_START_SECONDS_SINCE_MIDNIGHT;
+        }
+    }
+
+    return err;
+}
+
+// Set the start of peak time in NVS.
+static int32_t nvs_peak_start_seconds_since_midnight_set(nvs_shadow_t *nvs_shadow,
+                                                         uint32_t start_seconds_since_midnight)
+{
+    int32_t err = fgr_nvs_set(NVS_NAME_PEAK_START_SECONDS_SINCE_MIDNIGHT, start_seconds_since_midnight);
+
+    if ((err == ESP_OK) && nvs_shadow) {
+        nvs_shadow->peak_start_seconds_since_midnight = start_seconds_since_midnight;
+    }
+
+    return err;
+}
+
+// Retrieve the duration of peak time in seconds from NVS;
+// this is guaranteed to return a useful answer, even on error.
+static int32_t nvs_peak_duration_seconds_get(uint32_t *duration_seconds)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+
+    if (duration_seconds) {
+        err = fgr_nvs_get(NVS_NAME_PEAK_DURATION_SECONDS, duration_seconds);
+        if (err != ESP_OK) {
+            *duration_seconds = DEFAULT_PEAK_DURATION_SECONDS;
+        }
+    }
+
+    return err;
+}
+
+// Set the duration of peak time in NVS.
+static int32_t nvs_peak_duration_seconds_set(nvs_shadow_t *nvs_shadow,
+                                             uint32_t duration_seconds)
+{
+    int32_t err = fgr_nvs_set(NVS_NAME_PEAK_DURATION_SECONDS, duration_seconds);
+
+    if ((err == ESP_OK) && nvs_shadow) {
+        nvs_shadow->peak_duration_seconds = duration_seconds;
+    }
+
+    return err;
+}
+
+// Retrieve the launch interval during peak time in seconds from NVS;
+// this is guaranteed to return a useful answer, even on error.
+static int32_t nvs_peak_launch_interval_seconds_get(uint32_t *interval_seconds)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+
+    if (interval_seconds) {
+        err = fgr_nvs_get(NVS_NAME_PEAK_LAUNCH_INTERVAL_SECONDS, interval_seconds);
+        if (err != ESP_OK) {
+            *interval_seconds = DEFAULT_PEAK_LAUNCH_INTERVAL_SECONDS;
+        }
+    }
+
+    return err;
+}
+
+// Set the peak time launch intreval in NVS.
+static int32_t nvs_peak_launch_interval_seconds_set(nvs_shadow_t *nvs_shadow,
+                                                    uint32_t interval_seconds)
+{
+    int32_t err = fgr_nvs_set(NVS_NAME_PEAK_LAUNCH_INTERVAL_SECONDS, interval_seconds);
+
+    if ((err == ESP_OK) && nvs_shadow) {
+        nvs_shadow->peak_launch_interval_seconds = interval_seconds;
     }
 
     return err;
@@ -796,14 +1087,38 @@ static void nvs_populate(nvs_shadow_t *nvs_shadow)
     // Since the NVS functions all return a default value
     // on error, we can write that value back to set up
     // NVS when it is blank
-    if (nvs_auto_enable_get(&enable) != ESP_OK) {
-        nvs_auto_enable_set(NULL, enable);
+    if (nvs_off_peak_enable_get(&enable) != ESP_OK) {
+        nvs_off_peak_enable_set(NULL, enable);
     }
-    nvs_shadow->auto_enabled = enable;
-    if (nvs_auto_period_seconds_get(&value) != ESP_OK) {
-        nvs_auto_period_seconds_set(NULL, value);
+    nvs_shadow->off_peak_enabled = enable;
+    if (nvs_off_peak_start_seconds_since_midnight_get(&value) != ESP_OK) {
+        nvs_off_peak_start_seconds_since_midnight_set(NULL, value);
     }
-    nvs_shadow->auto_period_seconds = value;
+    nvs_shadow->off_peak_start_seconds_since_midnight = value;
+    if (nvs_off_peak_duration_seconds_get(&value) != ESP_OK) {
+        nvs_off_peak_duration_seconds_set(NULL, value);
+    }
+    nvs_shadow->off_peak_duration_seconds = value;
+    if (nvs_off_peak_launch_interval_seconds_get(&value) != ESP_OK) {
+        nvs_off_peak_launch_interval_seconds_set(NULL, value);
+    }
+    nvs_shadow->off_peak_launch_interval_seconds = value;
+    if (nvs_peak_enable_get(&enable) != ESP_OK) {
+        nvs_peak_enable_set(NULL, enable);
+    }
+    nvs_shadow->peak_enabled = enable;
+    if (nvs_peak_start_seconds_since_midnight_get(&value) != ESP_OK) {
+        nvs_peak_start_seconds_since_midnight_set(NULL, value);
+    }
+    nvs_shadow->peak_start_seconds_since_midnight = value;
+    if (nvs_peak_duration_seconds_get(&value) != ESP_OK) {
+        nvs_peak_duration_seconds_set(NULL, value);
+    }
+    nvs_shadow->peak_duration_seconds = value;
+    if (nvs_peak_launch_interval_seconds_get(&value) != ESP_OK) {
+        nvs_peak_launch_interval_seconds_set(NULL, value);
+    }
+    nvs_shadow->peak_launch_interval_seconds = value;
     if (nvs_height_max_mm_get(&value) != ESP_OK) {
         nvs_height_max_mm_set(NULL, value);
     }
@@ -1336,31 +1651,157 @@ static bool timer_has_expired(launcher_timer_t *timer)
     return elapsed_us > timer->duration_us;
 }
 
+// Return the offset from the start of a run to the T0 time in seconds.
+static int32_t t0_offset(launcher_t *launcher)
+{
+    nvs_shadow_t *nvs_shadow = &launcher->nvs_shadow;
+    int32_t offset = 0;
+
+    if (nvs_shadow->track_number_deluge < FGR_UTIL_ARRAY_LENGTH(g_track_duration_ms)) {
+        offset = g_track_duration_ms[nvs_shadow->track_number_deluge];
+    }
+
+    return offset / 1000;
+}
+
+// Reset the auto timer, called when the user changes a parameter
+static void auto_timer_reset(launcher_t *launcher)
+{
+    launcher->timer_auto.duration_us = 0;
+    __atomic_store_n(&launcher->next_t0, NO_COUNTDOWN, __ATOMIC_RELAXED);
+}
+
+// Check if we are inside an automatic activity period
+static bool auto_is_active(int32_t possible_t0_seconds_since_midnight,
+                           int32_t period_start_seconds_since_midnight,
+                           int32_t period_duration_seconds)
+{
+    bool active = false;
+
+    if ((possible_t0_seconds_since_midnight >= period_start_seconds_since_midnight) &&
+        (possible_t0_seconds_since_midnight < period_start_seconds_since_midnight + period_duration_seconds)) {
+        active = true;
+    }
+
+    return active;
+}
+
+// Handle the auto timer.
+static bool auto_timer_has_expired(launcher_t *launcher)
+{
+    bool has_expired = false;
+    nvs_shadow_t *nvs_shadow = &launcher->nvs_shadow;
+
+    time_t next_t0 = NO_COUNTDOWN;
+    if (nvs_shadow->off_peak_enabled || nvs_shadow->peak_enabled) {
+        // Get the number of seconds since [local] midnight
+        time_t now;
+        time(&now);
+        // Convert to local time
+        struct tm timeinfo;
+        localtime_r(&now, &timeinfo);
+        int32_t seconds_since_midnight = timeinfo.tm_hour * 3600 + timeinfo.tm_min * 60 + timeinfo.tm_sec;
+        // Get the time of the last [local] midnight
+        timeinfo.tm_hour = 0;
+        timeinfo.tm_min  = 0;
+        timeinfo.tm_sec  = 0;
+        timeinfo.tm_isdst = -1;
+        time_t midnight = mktime(&timeinfo);
+
+        // Work out if we are in a period of automatic activity
+        int32_t launch_interval_seconds = 0;
+        time_t start_time[] = {NO_COUNTDOWN, NO_COUNTDOWN};
+        int32_t offset_seconds = t0_offset(launcher);
+        time_t possible_t0 = seconds_since_midnight + offset_seconds;
+        if (nvs_shadow->off_peak_enabled) {
+            start_time[0] = nvs_shadow->off_peak_start_seconds_since_midnight + midnight;
+            if (auto_is_active(possible_t0,
+                               nvs_shadow->off_peak_start_seconds_since_midnight,
+                               nvs_shadow->off_peak_duration_seconds)) {
+                // Inside the off-peak launch period
+                launch_interval_seconds = nvs_shadow->off_peak_launch_interval_seconds;
+                next_t0 = possible_t0 + midnight;
+            }
+        }
+        if (nvs_shadow->peak_enabled) {
+            start_time[1] = nvs_shadow->peak_start_seconds_since_midnight + midnight;
+            if (auto_is_active(possible_t0,
+                               nvs_shadow->peak_start_seconds_since_midnight,
+                               nvs_shadow->peak_duration_seconds)) {
+                // Peak trumps off-peak
+                launch_interval_seconds = nvs_shadow->peak_launch_interval_seconds;
+                next_t0 = possible_t0 + midnight;
+            }
+        }
+
+        if (launch_interval_seconds > 0) {
+            // Our possible T0 is inside an activity period, check/set the auto timer
+            launcher->auto_period_seconds = launch_interval_seconds;
+            if (launcher->timer_auto.duration_us == 0) {
+                // No timer was set, must be the first time in, let's go...
+                has_expired = true;
+            } else {
+                //  Timer was already set, see if it has expired
+                has_expired = timer_has_expired(&launcher->timer_auto);
+            }
+            if ((launcher->timer_auto.duration_us == 0) || has_expired) {
+                // No timer was set or it has expired, set a new timeout
+                // (it will be cancelled next time we come in here if we
+                // have gone beyond the end of an activity period)
+                timer_start_us(&launcher->timer_auto, ((int64_t) launch_interval_seconds) * 1000000);
+                next_t0 += launch_interval_seconds;
+            }
+        } else {
+            // Not in an activity period, set the auto timer duration
+            // to zero to flag that there is none
+            launcher->timer_auto.duration_us = 0;
+        }
+
+        if (next_t0 == NO_COUNTDOWN) {
+            // Not in an active period at the moment: set the
+            // T0 to when the next one will start
+            time_t _start_time = start_time[0];
+            if ((_start_time == NO_COUNTDOWN) || (start_time[1] < _start_time)) {
+                _start_time = start_time[1];
+            }
+            if (_start_time != NO_COUNTDOWN) {
+                next_t0 = _start_time + offset_seconds;
+            }
+        }
+    }
+
+    if (launcher->state == LAUNCHER_STATE_READY) {
+        // If we are ready, store the next T0 so that
+        // display_countdown_cb() can use it
+        __atomic_store_n(&launcher->next_t0, next_t0,  __ATOMIC_RELAXED);
+    }
+
+    return has_expired;
+}
+
 // Task callback to run auto mode.
 static void auto_cb(void *handle, void *arg)
 {
     launcher_t *launcher = (launcher_t *) arg;
-    nvs_shadow_t *nvs_shadow = &launcher->nvs_shadow;
 
     (void) handle;
 
-    if (nvs_shadow->auto_enabled && timer_has_expired(&launcher->timer_auto)) {
+    if (auto_timer_has_expired(launcher)) {
         if (launcher->state == LAUNCHER_STATE_READY) {
             // Start the next run
             launcher_state_t state = LAUNCHER_STATE_RUN;
             xQueueSend(launcher->queue_state, &state, portMAX_DELAY);
-            launcher->auto_period_seconds = nvs_shadow->auto_period_seconds;
             ESP_LOGI(TAG, "### Auto mode timer expired (next expiry in %d second(s)) ###",
                      launcher->auto_period_seconds);
         } else {
             // Couldn't start, try again in a shorter time
             launcher->auto_period_seconds = AUTO_MODE_RETRY_TIME_SECONDS;
-            ESP_LOGI(TAG, "Unable to auto-run in state %s, retrying in %d second(s).",
+            ESP_LOGI(TAG, "unable to auto-run in state %s, retrying in %d second(s).",
                      g_launcher_state_name[launcher->state], launcher->auto_period_seconds);
         }
-        // Set the next timeout
-        timer_start_us(&launcher->timer_auto, ((int64_t) launcher->auto_period_seconds) * 1000000);
     }
+
+    vTaskDelay(pdMS_TO_TICKS(100));
 }
 
 // Print out the current height.
@@ -1471,6 +1912,14 @@ static launcher_state_t advance_state_commanded_run(launcher_t *launcher,
 
 
     if (height_mm < height_max_mm) {
+        // If there was no countdown, set one now
+        time_t next_t0 = __atomic_load_n(&launcher->next_t0, __ATOMIC_RELAXED);
+        if (next_t0 == NO_COUNTDOWN) {
+            time_t t0_seconds;
+            time(&t0_seconds);
+            t0_seconds += t0_offset(launcher);
+            __atomic_store_n(&launcher->next_t0, t0_seconds, __ATOMIC_RELAXED);
+        }
         // Set up the deluge audio for a duration
         uint32_t track_number = nvs_shadow->track_number_deluge;
         int64_t duration_us = 0;
@@ -1504,6 +1953,10 @@ static launcher_state_t advance_state_running_deluge(launcher_t *launcher,
 
     // Wait for the deluge time to pass
     if (timer_has_expired(&launcher->timer_a)) {
+        // Start launching audio
+        if (!nvs_shadow->mute) {
+            audio_play_track(nvs_shadow->track_number_launching);
+        }
         // Prepare for ignition
         launcher->temporary_stop = false;
         launcher->direction_up_not_down = true;
@@ -1589,10 +2042,6 @@ static launcher_state_t advance_state_running_ignition(launcher_t *launcher,
                 launcher->temporary_stop = false;
                 launcher->height_target_mm = height_max_mm;
                 launcher->direction_up_not_down = true;
-                // Start audio
-                if (!nvs_shadow->mute) {
-                    audio_play_track(nvs_shadow->track_number_launching);
-                }
                 ESP_LOGI(TAG, "height_mm %d, height_target_mm %d.",
                          height_mm, launcher->height_target_mm);
                 motor_set_height_mm(&launcher->motor,
@@ -1676,6 +2125,7 @@ static launcher_state_t advance_state_running_resetting(launcher_t *launcher,
         launcher->height_target_mm = POSITION_UNKNOWN;
         motor_stop(&launcher->motor, TMC5160_IDLE_CURRENT_MA, false);
         print_height(height_mm);
+        __atomic_store_n(&launcher->next_t0, NO_COUNTDOWN, __ATOMIC_RELAXED);
         next_state = LAUNCHER_STATE_POSITION_UNKNOWN;
     }
 
@@ -2074,8 +2524,14 @@ static void handler_reset_to_defaults(launcher_t *launcher, uint32_t unused, boo
     nvs_shadow_t *nvs_shadow = &launcher->nvs_shadow;
 
     // Write the default settings to NVS
-    nvs_auto_enable_set(nvs_shadow, DEFAULT_AUTO_ENABLE);
-    nvs_auto_period_seconds_set(nvs_shadow, DEFAULT_AUTO_PERIOD_SECONDS);
+    nvs_off_peak_enable_set(nvs_shadow, DEFAULT_OFF_PEAK_ENABLE);
+    nvs_off_peak_start_seconds_since_midnight_set(nvs_shadow, DEFAULT_OFF_PEAK_START_SECONDS_SINCE_MIDNIGHT);
+    nvs_off_peak_duration_seconds_set(nvs_shadow, DEFAULT_OFF_PEAK_DURATION_SECONDS);
+    nvs_off_peak_launch_interval_seconds_set(nvs_shadow, DEFAULT_OFF_PEAK_LAUNCH_INTERVAL_SECONDS);
+    nvs_peak_enable_set(nvs_shadow, DEFAULT_PEAK_ENABLE);
+    nvs_peak_start_seconds_since_midnight_set(nvs_shadow, DEFAULT_PEAK_START_SECONDS_SINCE_MIDNIGHT);
+    nvs_peak_duration_seconds_set(nvs_shadow, DEFAULT_PEAK_DURATION_SECONDS);
+    nvs_peak_launch_interval_seconds_set(nvs_shadow, DEFAULT_PEAK_LAUNCH_INTERVAL_SECONDS);
     nvs_height_max_mm_set(nvs_shadow, DEFAULT_HEIGHT_MAX_MM);
     nvs_speed_mm_per_second_set(nvs_shadow, DEFAULT_SPEED_MM_PER_SECOND);
     nvs_track_number_deluge_set(nvs_shadow, DEFAULT_TRACK_NUMBER_DELUGE);
@@ -2084,9 +2540,8 @@ static void handler_reset_to_defaults(launcher_t *launcher, uint32_t unused, boo
     nvs_track_number_resetting_set(nvs_shadow, DEFAULT_TRACK_NUMBER_RESETTING);
     nvs_mute_set(nvs_shadow, DEFAULT_MUTE);
 
-    // Reset the auto timer directly
-    launcher->auto_period_seconds = DEFAULT_AUTO_PERIOD_SECONDS;
-    timer_start_us(&launcher->timer_auto, ((int64_t) launcher->auto_period_seconds) * 1000000);
+    // Reset the auto timer so that it gets recalculated
+    auto_timer_reset(launcher);
 
     // Reset the current step and set ground level to unknown
     // but leave emergency stopped alone
@@ -2139,29 +2594,95 @@ static void handler_play_track(launcher_t *launcher, uint32_t track_number, bool
     audio_play_track(track_number);
 }
 
-// Handle the "auto enable" command.
-static void handler_auto_enable(launcher_t *launcher, uint32_t enable, bool read_not_write)
+// Handle the "enable off peak" command.
+static void handler_off_peak_enable(launcher_t *launcher, uint32_t enable, bool read_not_write)
 {
     if (!read_not_write) {
         // Write the new setting to NVS
-        nvs_auto_enable_set(&launcher->nvs_shadow, enable ? true : false);
+        nvs_off_peak_enable_set(&launcher->nvs_shadow, enable ? true : false);
         if (enable) {
-            // Set the timer to a short period so that the change takes effect quickly
-            launcher->auto_period_seconds = AUTO_MODE_RETRY_TIME_SECONDS;
-            timer_start_us(&launcher->timer_auto, ((int64_t) launcher->auto_period_seconds) * 1000000);
+            // Reset the auto timer so that it gets recalculated
+            auto_timer_reset(launcher);
         }
     }
 }
 
-// Handle the "auto period" command.
-static void handler_auto_period_seconds(launcher_t *launcher, uint32_t period, bool read_not_write)
+// Handle the "off peak start" command.
+static void handler_off_peak_start_seconds_since_midnight(launcher_t *launcher, uint32_t seconds_since_midnight, bool read_not_write)
 {
     if (!read_not_write) {
         // Write the new setting to NVS
-        nvs_auto_period_seconds_set(&launcher->nvs_shadow, period);
-        // Reset the timer
-        launcher->auto_period_seconds = period;
-        timer_start_us(&launcher->timer_auto, ((int64_t) launcher->auto_period_seconds) * 1000000);
+        nvs_off_peak_start_seconds_since_midnight_set(&launcher->nvs_shadow, seconds_since_midnight);
+        // Reset the auto timer so that it gets recalculated
+        auto_timer_reset(launcher);
+    }
+}
+
+// Handle the "off peak duration" command.
+static void handler_off_peak_duration_seconds(launcher_t *launcher, uint32_t duration, bool read_not_write)
+{
+    if (!read_not_write) {
+        // Write the new setting to NVS
+        nvs_off_peak_duration_seconds_set(&launcher->nvs_shadow, duration);
+        // Reset the auto timer so that it gets recalculated
+        auto_timer_reset(launcher);
+    }
+}
+
+// Handle the "off peak launch interval" command.
+static void handler_off_peak_launch_interval_seconds(launcher_t *launcher, uint32_t interval, bool read_not_write)
+{
+    if (!read_not_write) {
+        // Write the new setting to NVS
+        nvs_off_peak_launch_interval_seconds_set(&launcher->nvs_shadow, interval);
+        // Reset the auto timer so that it gets recalculated
+        auto_timer_reset(launcher);
+    }
+}
+
+// Handle the "enable peak" command.
+static void handler_peak_enable(launcher_t *launcher, uint32_t enable, bool read_not_write)
+{
+    if (!read_not_write) {
+        // Write the new setting to NVS
+        nvs_peak_enable_set(&launcher->nvs_shadow, enable ? true : false);
+        if (enable) {
+            // Reset the auto timer so that it gets recalculated
+            auto_timer_reset(launcher);
+        }
+    }
+}
+
+// Handle the "peak start" command.
+static void handler_peak_start_seconds_since_midnight(launcher_t *launcher, uint32_t seconds_since_midnight, bool read_not_write)
+{
+    if (!read_not_write) {
+        // Write the new setting to NVS
+        nvs_peak_start_seconds_since_midnight_set(&launcher->nvs_shadow, seconds_since_midnight);
+        // Reset the auto timer so that it gets recalculated
+        auto_timer_reset(launcher);
+    }
+}
+
+// Handle the "peak duration" command.
+static void handler_peak_duration_seconds(launcher_t *launcher, uint32_t duration, bool read_not_write)
+{
+    if (!read_not_write) {
+        // Write the new setting to NVS
+        nvs_peak_duration_seconds_set(&launcher->nvs_shadow, duration);
+        // Reset the auto timer so that it gets recalculated
+        auto_timer_reset(launcher);
+    }
+}
+
+// Handle the "peak launch interval" command.
+static void handler_peak_launch_interval_seconds(launcher_t *launcher, uint32_t interval, bool read_not_write)
+{
+    if (!read_not_write) {
+        // Write the new setting to NVS
+        nvs_peak_launch_interval_seconds_set(&launcher->nvs_shadow, interval);
+        // Reset the auto timer so that it gets recalculated
+        auto_timer_reset(launcher);
     }
 }
 
@@ -2476,22 +2997,134 @@ static int characteristic_play_track_cb(uint16_t conn_handle, uint16_t attr_hand
     return return_code;
 }
 
-// "Auto enable" characteristic callback.
-static int characteristic_auto_enable_cb(uint16_t conn_handle, uint16_t attr_handle,
+// "enable off peak" characteristic callback.
+static int characteristic_off_peak_enable_cb(uint16_t conn_handle, uint16_t attr_handle,
+                                             struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    int return_code;
+    context_t *context = (context_t *) arg;
+
+    CONTEXT_LOCK(context->lock, "characteristic_off_peak_enable_cb");
+
+    command_contents_t command_contents = {.command = COMMAND_OFF_PEAK_ENABLE,
+                                           .read_not_write = (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)};
+    if (command_contents.read_not_write) {
+        // Read the current setting from the shadow
+        launcher_t *launcher = &context->launcher;
+        nvs_shadow_t *nvs_shadow = &launcher->nvs_shadow;
+        command_contents.value = nvs_shadow->off_peak_enabled ? 1 : 0;
+    } else {
+        // Read the value sent with the BLE command
+        command_contents.value = mbuf_read(ctxt->om);
+    }
+
+    return_code = queue_command(conn_handle, attr_handle, ctxt, context, &command_contents);
+
+    CONTEXT_UNLOCK(context->lock, "characteristic_off_peak_enable_cb");
+
+    return return_code;
+}
+
+// "off peak start" characteristic callback.
+static int characteristic_off_peak_start_seconds_since_midnight_cb(uint16_t conn_handle, uint16_t attr_handle,
+                                                                   struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    int return_code;
+    context_t *context = (context_t *) arg;
+
+    CONTEXT_LOCK(context->lock, "characteristic_off_peak_start_seconds_since_midnight_cb");
+
+    command_contents_t command_contents = {.command = COMMAND_OFF_PEAK_START_SECONDS_SINCE_MIDNIGHT,
+                                           .read_not_write = (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)};
+    if (command_contents.read_not_write) {
+        // Read the current setting from the shadow
+        launcher_t *launcher = &context->launcher;
+        nvs_shadow_t *nvs_shadow = &launcher->nvs_shadow;
+        command_contents.value = nvs_shadow->off_peak_start_seconds_since_midnight;
+    } else {
+        // Read the value sent with the BLE command
+        command_contents.value = mbuf_read(ctxt->om);
+    }
+    return_code = queue_command(conn_handle, attr_handle, ctxt, context, &command_contents);
+
+    CONTEXT_UNLOCK(context->lock, "characteristic_off_peak_start_seconds_since_midnight_cb");
+
+    return return_code;
+}
+
+// "off peak duration" characteristic callback.
+static int characteristic_off_peak_duration_seconds_cb(uint16_t conn_handle, uint16_t attr_handle,
+                                                       struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    int return_code;
+    context_t *context = (context_t *) arg;
+
+    CONTEXT_LOCK(context->lock, "characteristic_off_peak_duration_seconds_cb");
+
+    command_contents_t command_contents = {.command = COMMAND_OFF_PEAK_DURATION_SECONDS,
+                                           .read_not_write = (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)};
+    if (command_contents.read_not_write) {
+        // Read the current setting from the shadow
+        launcher_t *launcher = &context->launcher;
+        nvs_shadow_t *nvs_shadow = &launcher->nvs_shadow;
+        command_contents.value = nvs_shadow->off_peak_duration_seconds;
+    } else {
+        // Read the value sent with the BLE command
+        command_contents.value = mbuf_read(ctxt->om);
+    }
+    return_code = queue_command(conn_handle, attr_handle, ctxt, context, &command_contents);
+
+    CONTEXT_UNLOCK(context->lock, "characteristic_off_peak_duration_seconds_cb");
+
+    return return_code;
+}
+
+// "off peak launch interval" characteristic callback.
+static int characteristic_off_peak_launch_interval_seconds_cb(uint16_t conn_handle, uint16_t attr_handle,
+                                                              struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    int return_code;
+    context_t *context = (context_t *) arg;
+
+    CONTEXT_LOCK(context->lock, "characteristic_off_peak_launch_interval_seconds_cb");
+
+    command_contents_t command_contents = {.command = COMMAND_OFF_PEAK_LAUNCH_INTERVAL_SECONDS,
+                                           .read_not_write = (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)};
+    if (command_contents.read_not_write) {
+        // Read the current setting from the shadow
+        launcher_t *launcher = &context->launcher;
+        nvs_shadow_t *nvs_shadow = &launcher->nvs_shadow;
+        command_contents.value = nvs_shadow->off_peak_launch_interval_seconds;
+    } else {
+        // Read the value sent with the BLE command
+        command_contents.value = mbuf_read(ctxt->om);
+    }
+    return_code = queue_command(conn_handle, attr_handle, ctxt, context, &command_contents);
+
+    CONTEXT_UNLOCK(context->lock, "characteristic_off_peak_launch_interval_seconds_cb");
+
+    return return_code;
+}
+
+
+
+
+// "enable peak" characteristic callback.
+static int characteristic_peak_enable_cb(uint16_t conn_handle, uint16_t attr_handle,
                                          struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     int return_code;
     context_t *context = (context_t *) arg;
 
-    CONTEXT_LOCK(context->lock, "characteristic_auto_enable_cb");
+    CONTEXT_LOCK(context->lock, "characteristic_peak_enable_cb");
 
-    command_contents_t command_contents = {.command = COMMAND_AUTO_ENABLE,
+    command_contents_t command_contents = {.command = COMMAND_PEAK_ENABLE,
                                            .read_not_write = (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)};
     if (command_contents.read_not_write) {
         // Read the current setting from the shadow
         launcher_t *launcher = &context->launcher;
         nvs_shadow_t *nvs_shadow = &launcher->nvs_shadow;
-        command_contents.value = nvs_shadow->auto_enabled ? 1 : 0;
+        command_contents.value = nvs_shadow->peak_enabled ? 1 : 0;
     } else {
         // Read the value sent with the BLE command
         command_contents.value = mbuf_read(ctxt->om);
@@ -2499,34 +3132,88 @@ static int characteristic_auto_enable_cb(uint16_t conn_handle, uint16_t attr_han
 
     return_code = queue_command(conn_handle, attr_handle, ctxt, context, &command_contents);
 
-    CONTEXT_UNLOCK(context->lock, "characteristic_auto_enable_cb");
+    CONTEXT_UNLOCK(context->lock, "characteristic_peak_enable_cb");
 
     return return_code;
 }
 
-// "Auto period" characteristic callback.
-static int characteristic_auto_period_seconds_cb(uint16_t conn_handle, uint16_t attr_handle,
-                                                 struct ble_gatt_access_ctxt *ctxt, void *arg)
+// "peak start" characteristic callback.
+static int characteristic_peak_start_seconds_since_midnight_cb(uint16_t conn_handle, uint16_t attr_handle,
+                                                               struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     int return_code;
     context_t *context = (context_t *) arg;
 
-    CONTEXT_LOCK(context->lock, "characteristic_auto_period_seconds_cb");
+    CONTEXT_LOCK(context->lock, "characteristic_peak_start_seconds_since_midnight_cb");
 
-    command_contents_t command_contents = {.command = COMMAND_AUTO_PERIOD_SECONDS,
+    command_contents_t command_contents = {.command = COMMAND_PEAK_START_SECONDS_SINCE_MIDNIGHT,
                                            .read_not_write = (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)};
     if (command_contents.read_not_write) {
         // Read the current setting from the shadow
         launcher_t *launcher = &context->launcher;
         nvs_shadow_t *nvs_shadow = &launcher->nvs_shadow;
-        command_contents.value = nvs_shadow->auto_period_seconds;
+        command_contents.value = nvs_shadow->peak_start_seconds_since_midnight;
     } else {
         // Read the value sent with the BLE command
         command_contents.value = mbuf_read(ctxt->om);
     }
     return_code = queue_command(conn_handle, attr_handle, ctxt, context, &command_contents);
 
-    CONTEXT_UNLOCK(context->lock, "characteristic_auto_period_seconds_cb");
+    CONTEXT_UNLOCK(context->lock, "characteristic_peak_start_seconds_since_midnight_cb");
+
+    return return_code;
+}
+
+// "peak duration" characteristic callback.
+static int characteristic_peak_duration_seconds_cb(uint16_t conn_handle, uint16_t attr_handle,
+                                                   struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    int return_code;
+    context_t *context = (context_t *) arg;
+
+    CONTEXT_LOCK(context->lock, "characteristic_peak_duration_seconds_cb");
+
+    command_contents_t command_contents = {.command = COMMAND_PEAK_DURATION_SECONDS,
+                                           .read_not_write = (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)};
+    if (command_contents.read_not_write) {
+        // Read the current setting from the shadow
+        launcher_t *launcher = &context->launcher;
+        nvs_shadow_t *nvs_shadow = &launcher->nvs_shadow;
+        command_contents.value = nvs_shadow->peak_duration_seconds;
+    } else {
+        // Read the value sent with the BLE command
+        command_contents.value = mbuf_read(ctxt->om);
+    }
+    return_code = queue_command(conn_handle, attr_handle, ctxt, context, &command_contents);
+
+    CONTEXT_UNLOCK(context->lock, "characteristic_peak_duration_seconds_cb");
+
+    return return_code;
+}
+
+// "peak launch interval" characteristic callback.
+static int characteristic_peak_launch_interval_seconds_cb(uint16_t conn_handle, uint16_t attr_handle,
+                                                          struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    int return_code;
+    context_t *context = (context_t *) arg;
+
+    CONTEXT_LOCK(context->lock, "characteristic_peak_launch_interval_seconds_cb");
+
+    command_contents_t command_contents = {.command = COMMAND_PEAK_LAUNCH_INTERVAL_SECONDS,
+                                           .read_not_write = (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)};
+    if (command_contents.read_not_write) {
+        // Read the current setting from the shadow
+        launcher_t *launcher = &context->launcher;
+        nvs_shadow_t *nvs_shadow = &launcher->nvs_shadow;
+        command_contents.value = nvs_shadow->peak_launch_interval_seconds;
+    } else {
+        // Read the value sent with the BLE command
+        command_contents.value = mbuf_read(ctxt->om);
+    }
+    return_code = queue_command(conn_handle, attr_handle, ctxt, context, &command_contents);
+
+    CONTEXT_UNLOCK(context->lock, "characteristic_peak_launch_interval_seconds_cb");
 
     return return_code;
 }
@@ -2846,83 +3533,125 @@ static const command_data_t g_command_data_list[] = {{.type = COMMAND_TYPE_WRITE
                                                      },
                                                      {.type = COMMAND_TYPE_WRITE_ONLY_UINT32,
                                                       .uuid = 0xFFE8,
-                                                      .name = "PLAY TRACK",
+                                                      .name = "PLAY_TRACK",
                                                       .characteristic_cb = characteristic_play_track_cb,
                                                       .flags = BLE_GATT_CHR_F_WRITE_NO_RSP,
                                                       .handler = handler_play_track
                                                      },
                                                      {.type = COMMAND_TYPE_READ_WRITE_BOOLEAN,
                                                       .uuid = 0xFFE9,
-                                                      .name = "AUTO",
-                                                      .characteristic_cb = characteristic_auto_enable_cb,
+                                                      .name = "OFF_PEAK",
+                                                      .characteristic_cb = characteristic_off_peak_enable_cb,
                                                       .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_READ,
-                                                      .handler = handler_auto_enable
+                                                      .handler = handler_off_peak_enable
                                                      },
                                                      {.type = COMMAND_TYPE_READ_WRITE_UINT32,
                                                       .uuid = 0xFFEA,
-                                                      .name = "AUTO_PERIOD_SECONDS",
-                                                      .characteristic_cb = characteristic_auto_period_seconds_cb,
+                                                      .name = "OFF_PEAK_START_SECONDS_SINCE_MIDNIGHT",
+                                                      .characteristic_cb = characteristic_off_peak_start_seconds_since_midnight_cb,
                                                       .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_READ,
-                                                      .handler = handler_auto_period_seconds
+                                                      .handler = handler_off_peak_start_seconds_since_midnight
                                                      },
                                                      {.type = COMMAND_TYPE_READ_WRITE_UINT32,
                                                       .uuid = 0xFFEB,
+                                                      .name = "OFF_PEAK_DURATION_SECONDS",
+                                                      .characteristic_cb = characteristic_off_peak_duration_seconds_cb,
+                                                      .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_READ,
+                                                      .handler = handler_off_peak_duration_seconds
+                                                     },
+                                                     {.type = COMMAND_TYPE_READ_WRITE_UINT32,
+                                                      .uuid = 0xFFEC,
+                                                      .name = "OFF_PEAK_LAUNCH_INTERVAL_SECONDS",
+                                                      .characteristic_cb = characteristic_off_peak_launch_interval_seconds_cb,
+                                                      .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_READ,
+                                                      .handler = handler_off_peak_launch_interval_seconds
+                                                     },
+                                                     {.type = COMMAND_TYPE_READ_WRITE_BOOLEAN,
+                                                      .uuid = 0xFFED,
+                                                      .name = "PEAK",
+                                                      .characteristic_cb = characteristic_peak_enable_cb,
+                                                      .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_READ,
+                                                      .handler = handler_peak_enable
+                                                     },
+                                                     {.type = COMMAND_TYPE_READ_WRITE_UINT32,
+                                                      .uuid = 0xFFEE,
+                                                      .name = "PEAK_START_SECONDS_SINCE_MIDNIGHT",
+                                                      .characteristic_cb = characteristic_peak_start_seconds_since_midnight_cb,
+                                                      .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_READ,
+                                                      .handler = handler_peak_start_seconds_since_midnight
+                                                     },
+                                                     {.type = COMMAND_TYPE_READ_WRITE_UINT32,
+                                                      .uuid = 0xFFEF,
+                                                      .name = "PEAK_DURATION_SECONDS",
+                                                      .characteristic_cb = characteristic_peak_duration_seconds_cb,
+                                                      .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_READ,
+                                                      .handler = handler_peak_duration_seconds
+                                                     },
+                                                     {.type = COMMAND_TYPE_READ_WRITE_UINT32,
+                                                      .uuid = 0xFFF0,
+                                                      .name = "PEAK_LAUNCH_INTERVAL_SECONDS",
+                                                      .characteristic_cb = characteristic_peak_launch_interval_seconds_cb,
+                                                      .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_READ,
+                                                      .handler = handler_peak_launch_interval_seconds
+                                                     },
+                                                     {.type = COMMAND_TYPE_READ_WRITE_UINT32,
+                                                      .uuid = 0xFFF1,
                                                       .name = "HEIGHT_MAX_MM",
                                                       .characteristic_cb = characteristic_height_max_mm_cb,
                                                       .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_READ,
                                                       .handler = handler_height_max_mm
                                                      },
                                                      {.type = COMMAND_TYPE_READ_WRITE_UINT32,
-                                                      .uuid = 0xFFEC,
+                                                      .uuid = 0xFFF2,
                                                       .name = "SPEED_MM_PER_SECOND",
                                                       .characteristic_cb = characteristic_speed_mm_per_second_cb,
                                                       .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_READ,
                                                       .handler = handler_speed_mm_per_second
                                                      },
                                                      {.type = COMMAND_TYPE_READ_WRITE_UINT32,
-                                                      .uuid = 0xFFED,
+                                                      .uuid = 0xFFF3,
                                                       .name = "COMMAND_TRACK_NUMBER_DELUGE",
                                                       .characteristic_cb = characteristic_track_number_deluge_cb,
                                                       .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_READ,
                                                       .handler = handler_track_number_deluge
                                                      },
                                                      {.type = COMMAND_TYPE_READ_WRITE_UINT32,
-                                                      .uuid = 0xFFEE,
+                                                      .uuid = 0xFFF4,
                                                       .name = "COMMAND_TRACK_NUMBER_LAUNCHING",
                                                       .characteristic_cb = characteristic_track_number_launching_cb,
                                                       .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_READ,
                                                       .handler = handler_track_number_launching
                                                      },
                                                      {.type = COMMAND_TYPE_READ_WRITE_UINT32,
-                                                      .uuid = 0xFFEF,
+                                                      .uuid = 0xFFF5,
                                                       .name = "COMMAND_TRACK_NUMBER_DANGLING",
                                                       .characteristic_cb = characteristic_track_number_dangling_cb,
                                                       .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_READ,
                                                       .handler = handler_track_number_dangling
                                                      },
                                                      {.type = COMMAND_TYPE_READ_WRITE_UINT32,
-                                                      .uuid = 0xFFF0,
+                                                      .uuid = 0xFFF6,
                                                       .name = "COMMAND_TRACK_NUMBER_RESETTING",
                                                       .characteristic_cb = characteristic_track_number_resetting_cb,
                                                       .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_READ,
                                                       .handler = handler_track_number_resetting
                                                      },
                                                      {.type = COMMAND_TYPE_READ_WRITE_BOOLEAN,
-                                                      .uuid = 0xFFF1,
+                                                      .uuid = 0xFFF7,
                                                       .name = "MUTE",
                                                       .characteristic_cb = characteristic_mute_cb,
                                                       .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_READ,
                                                       .handler = handler_mute
                                                      },
                                                      {.type = COMMAND_TYPE_READ_ONLY,
-                                                      .uuid = 0xFFF2,
+                                                      .uuid = 0xFFF8,
                                                       .name = "STATE",
                                                       .characteristic_cb = characteristic_state_cb,
                                                       .flags = BLE_GATT_CHR_F_READ
                                                       // No handler for this one
                                                      },
                                                      {.type = COMMAND_TYPE_READ_ONLY,
-                                                      .uuid = 0xFFF3,
+                                                      .uuid = 0xFFF9,
                                                       .name = "HEIGHT_CURRENT_MM",
                                                       .characteristic_cb = characteristic_height_current_mm_cb,
                                                       .flags = BLE_GATT_CHR_F_READ
@@ -3000,19 +3729,62 @@ static const struct ble_gatt_svc_def g_ble_presents_to_the_moon_svcs[] = {
                 .flags = g_command_data_list[COMMAND_PLAY_TRACK].flags
             },
             {
-                // "Auto enable" characteristic
-                .uuid = BLE_UUID16_DECLARE(g_command_data_list[COMMAND_AUTO_ENABLE].uuid),
-                .access_cb = g_command_data_list[COMMAND_AUTO_ENABLE].characteristic_cb,
+                // "off peak enable" characteristic
+                .uuid = BLE_UUID16_DECLARE(g_command_data_list[COMMAND_OFF_PEAK_ENABLE].uuid),
+                .access_cb = g_command_data_list[COMMAND_OFF_PEAK_ENABLE].characteristic_cb,
                 .arg = &g_context,
-                .flags = g_command_data_list[COMMAND_AUTO_ENABLE].flags
+                .flags = g_command_data_list[COMMAND_OFF_PEAK_ENABLE].flags
             },
             {
-                // "Auto period" characteristic
-                .uuid = BLE_UUID16_DECLARE(g_command_data_list[COMMAND_AUTO_PERIOD_SECONDS].uuid),
-                .access_cb = g_command_data_list[COMMAND_AUTO_PERIOD_SECONDS].characteristic_cb,
+                // "off peak start" characteristic
+                .uuid = BLE_UUID16_DECLARE(g_command_data_list[COMMAND_OFF_PEAK_START_SECONDS_SINCE_MIDNIGHT].uuid),
+                .access_cb = g_command_data_list[COMMAND_OFF_PEAK_START_SECONDS_SINCE_MIDNIGHT].characteristic_cb,
                 .arg = &g_context,
-                .flags = g_command_data_list[COMMAND_AUTO_PERIOD_SECONDS].flags
+                .flags = g_command_data_list[COMMAND_OFF_PEAK_START_SECONDS_SINCE_MIDNIGHT].flags
             },
+            {
+                // "off peak duration" characteristic
+                .uuid = BLE_UUID16_DECLARE(g_command_data_list[COMMAND_OFF_PEAK_DURATION_SECONDS].uuid),
+                .access_cb = g_command_data_list[COMMAND_OFF_PEAK_DURATION_SECONDS].characteristic_cb,
+                .arg = &g_context,
+                .flags = g_command_data_list[COMMAND_OFF_PEAK_DURATION_SECONDS].flags
+            },
+            {
+                // "off peak launch interal" characteristic
+                .uuid = BLE_UUID16_DECLARE(g_command_data_list[COMMAND_OFF_PEAK_LAUNCH_INTERVAL_SECONDS].uuid),
+                .access_cb = g_command_data_list[COMMAND_OFF_PEAK_LAUNCH_INTERVAL_SECONDS].characteristic_cb,
+                .arg = &g_context,
+                .flags = g_command_data_list[COMMAND_OFF_PEAK_LAUNCH_INTERVAL_SECONDS].flags
+            },
+            {
+                // "peak enable" characteristic
+                .uuid = BLE_UUID16_DECLARE(g_command_data_list[COMMAND_PEAK_ENABLE].uuid),
+                .access_cb = g_command_data_list[COMMAND_PEAK_ENABLE].characteristic_cb,
+                .arg = &g_context,
+                .flags = g_command_data_list[COMMAND_PEAK_ENABLE].flags
+            },
+            {
+                // "peak start" characteristic
+                .uuid = BLE_UUID16_DECLARE(g_command_data_list[COMMAND_PEAK_START_SECONDS_SINCE_MIDNIGHT].uuid),
+                .access_cb = g_command_data_list[COMMAND_PEAK_START_SECONDS_SINCE_MIDNIGHT].characteristic_cb,
+                .arg = &g_context,
+                .flags = g_command_data_list[COMMAND_PEAK_START_SECONDS_SINCE_MIDNIGHT].flags
+            },
+            {
+                // "peak duration" characteristic
+                .uuid = BLE_UUID16_DECLARE(g_command_data_list[COMMAND_PEAK_DURATION_SECONDS].uuid),
+                .access_cb = g_command_data_list[COMMAND_PEAK_DURATION_SECONDS].characteristic_cb,
+                .arg = &g_context,
+                .flags = g_command_data_list[COMMAND_PEAK_DURATION_SECONDS].flags
+            },
+            {
+                // "peak launch interal" characteristic
+                .uuid = BLE_UUID16_DECLARE(g_command_data_list[COMMAND_PEAK_LAUNCH_INTERVAL_SECONDS].uuid),
+                .access_cb = g_command_data_list[COMMAND_PEAK_LAUNCH_INTERVAL_SECONDS].characteristic_cb,
+                .arg = &g_context,
+                .flags = g_command_data_list[COMMAND_PEAK_LAUNCH_INTERVAL_SECONDS].flags
+            },
+
             {
                 // "Height max" characteristic
                 .uuid = BLE_UUID16_DECLARE(g_command_data_list[COMMAND_HEIGHT_MAX_MM].uuid),
@@ -3399,7 +4171,7 @@ static int32_t init(context_t *context)
                                                   FGR_UTIL_ARRAY_LENGTH(g_ht16k33a_i2c_address_list),
                                                   HT16K33A_SCROLL_LEFT, HT16K33A_SCROLL_WRAP, 0);
                 if (context->display) {
-                    err = display_set_message(context->display, "boot", 1000);
+                    err = display_set_message(context->display, "    boot    ", 1000);
                 }
             }
         }
@@ -3411,7 +4183,7 @@ static int32_t init(context_t *context)
                                    WIFI_AUTH_OPEN,
                                    CONFIG_FGR_NETWORK_WIFI_REDUCED_TX_POWER);
             if (err != ESP_OK) {
-                display_set_message(context->display, "no Wifi", 1000);
+                display_set_message(context->display, "no Wifi", 5000);
             }
         }
 
@@ -3422,22 +4194,31 @@ static int32_t init(context_t *context)
                                 FGR_TIME_NTP_SYNC_INTERVAL_SECONDS);
             if (err == ESP_OK) {
                 ESP_LOGI(TAG, "waiting up to %d second(s) for time sync...", TIME_SYNC_WAIT_SECONDS);
+                display_set_message(context->display, "    sync    ", TIME_SYNC_WAIT_SECONDS * 1000);
                 launcher_timer_t timer;
                 timer_start_us(&timer, ((int64_t) TIME_SYNC_WAIT_SECONDS) * 1000000);
                 do {
                     err = fgr_time_sync_wait(1);
                 } while ((err < 0) && !timer_has_expired(&timer));
                 if (err >= 0) {
+                    display_clear_message(context->display);
                     // Display the time
                     context->display_source_clock = display_source_add(context->display,
                                                                        display_clock_cb,
                                                                        context, DISPLAY_CLOCK_PRIORITY,
                                                                        500, "clock");
                     if (context->display_source_clock) {
-                        err = ESP_OK;
+                        // Add the countdown callback (may not be active yet)
+                        context->display_source_countdown = display_source_add(context->display,
+                                                                               display_countdown_cb,
+                                                                               context, DISPLAY_COUNTDOWN_PRIORITY,
+                                                                               500, "countdown");
+                        if (context->display_source_countdown) {
+                            err = ESP_OK;
+                        }
                     }
                 } else {
-                    display_set_message(context->display, "no time", 1000);
+                    display_set_message(context->display, "no time", 5000);
                     ESP_LOGE(TAG, "unable to establish time!");
                 }
             }
@@ -3478,8 +4259,6 @@ static int32_t init(context_t *context)
 
         if (err == ESP_OK) {
             // Stuff needed for automatic mode
-            launcher->auto_period_seconds = nvs_shadow->auto_period_seconds;
-            timer_start_us(&launcher->timer_auto, ((int64_t) launcher->auto_period_seconds) * 1000000);
             err = fgr_task_create(&auto_cb, launcher, "auto", 4096, 3, &launcher->task_auto);
         }
 

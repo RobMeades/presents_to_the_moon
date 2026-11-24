@@ -62,7 +62,6 @@ struct display_source {
     const char          *name;
     int64_t              next_due_us;  // esp_timer_get_time() target
     char                 last_text[DISPLAY_SOURCE_TEXT_LENGTH];
-    bool                 have_text;    // last_text is valid
     SLIST_ENTRY(display_source) next;
 };
 
@@ -110,12 +109,63 @@ static context_t g_context = {0};
  * STATIC FUNCTIONS
  * -------------------------------------------------------------- */
 
+// Poll a single source if it is due, updating its cached text and
+// its next-due time.  Returns true if the source has non-empty
+// text to show after the poll (whether or not it was due this
+// time), false otherwise.  The source's text is taken to be
+// whatever is currently cached in last_text[], so a source that
+// was polled on a previous pass and returned text continues to
+// "win" on passes where it isn't polled.
+// IMPORTANT: the context must be locked before this is called.
+static bool source_poll(display_source_t *source)
+{
+    int64_t now = esp_timer_get_time();
+
+    if (now >= source->next_due_us) {
+        char buffer[DISPLAY_SOURCE_TEXT_LENGTH];
+        memset(buffer, 0, sizeof(buffer));
+
+        if (source->cb(buffer, sizeof(buffer), source->user_data)) {
+            strncpy(source->last_text, buffer,
+                    sizeof(source->last_text) - 1);
+            source->last_text[sizeof(source->last_text) - 1] = '\0';
+        } else {
+            source->last_text[0] = '\0';
+        }
+
+        // Schedule the next poll; use a fresh `now` so a long
+        // callback doesn't make the next poll immediately due.
+        source->next_due_us = esp_timer_get_time() +
+                              (int64_t) source->refresh_ms * 1000;
+    }
+
+    return source->last_text[0] != '\0';
+}
+
+// Walk the display's sources in priority order (they are kept
+// sorted by display_source_add() and display_source_set_priority())
+// and copy the highest-priority non-empty text into candidate.
+// Every source that is due is polled, so each source's refresh
+// rate is honoured regardless of what higher-priority sources
+// are doing.
+// IMPORTANT: the context must be locked before this is called.
+static void pick_source_text(display_t *display,
+                             char *candidate, size_t candidate_size)
+{
+    display_source_t *iter;
+
+    SLIST_FOREACH(iter, &display->sources, next) {
+        if (source_poll(iter) && (candidate[0] == '\0')) {
+            // First non-empty source in priority order wins.
+            strncpy(candidate, iter->last_text, candidate_size - 1);
+            candidate[candidate_size - 1] = '\0';
+        }
+    }
+}
+
 // Render a display's current state (message or best source) to
 // the underlying ht16k33a handle, if the text has changed.
 // IMPORTANT: the context must be locked before this is called.
-// The source callbacks are invoked with the lock released, so
-// this function must be careful not to assume it still holds it
-// across those calls: it re-acquires after each callback.
 static int32_t render_current(display_t *display)
 {
     int32_t err = ESP_OK;
@@ -128,70 +178,7 @@ static int32_t render_current(display_t *display)
         strncpy(candidate, display->message, sizeof(candidate) - 1);
         candidate[sizeof(candidate) - 1] = '\0';
     } else {
-        // Find the highest-priority source that has something to say.
-        // We do this by repeatedly scanning for the next-lowest
-        // priority number; num_sources is small (DISPLAY_MAX_SOURCES)
-        // so an O(n^2) scan is fine and lets us keep the list in
-        // registration order, making create/destroy in any order
-        // trivial.
-
-        int32_t last_priority = INT32_MAX;
-        bool found = false;
-
-        while (!found) {
-            display_source_t *best = NULL;
-            int32_t best_priority = INT32_MAX;
-            size_t best_index = (size_t) -1;
-            size_t index = 0;
-
-            // Pick the next-lowest priority that is strictly higher
-            // than last_priority, breaking ties by registration order.
-            display_source_t *iter;
-            SLIST_FOREACH(iter, &display->sources, next) {
-                if (iter->priority > last_priority) {
-                    // Already considered.
-                } else if ((iter->priority < best_priority) ||
-                           ((iter->priority == best_priority) &&
-                            (index < best_index))) {
-                    best = iter;
-                    best_priority = iter->priority;
-                    best_index = index;
-                }
-                index++;
-            }
-
-            if (best == NULL) {
-                // No more sources to consider.
-                break;
-            }
-
-            // Is it due?
-            int64_t now = esp_timer_get_time();
-            if (now >= best->next_due_us) {
-                char buffer[DISPLAY_SOURCE_TEXT_LENGTH];
-                memset(buffer, 0, sizeof(buffer));
-                bool have = best->cb(buffer, sizeof(buffer),
-                                     best->user_data);
-                if (have) {
-                    strncpy(best->last_text, buffer,
-                            sizeof(best->last_text) - 1);
-                    best->last_text[sizeof(best->last_text) - 1] = '\0';
-                    best->have_text = true;
-                }
-                // Schedule the next poll.  Use a fresh `now` so a
-                // long callback doesn't cause the next poll to be
-                // immediately due again.
-                best->next_due_us = esp_timer_get_time() + (int64_t) best->refresh_ms * 1000;
-
-                if (have && best->have_text && (best->last_text[0] != '\0')) {
-                    strncpy(candidate, best->last_text, sizeof(candidate) - 1);
-                    candidate[sizeof(candidate) - 1] = '\0';
-                    found = true;
-                }
-            }
-
-            last_priority = best_priority;
-        }
+        pick_source_text(display, candidate, sizeof(candidate));
     }
 
     // Only push to the hardware if it differs from what we last sent.
@@ -232,6 +219,8 @@ static void display_task_cb(void *handle, void *param)
     }
 
     CONTEXT_UNLOCK(g_context.lock, "display_task_cb()");
+
+    vTaskDelay(pdMS_TO_TICKS(50));
 }
 
 // Apply a scroll configuration to the underlying ht16k33a handle.
@@ -544,31 +533,33 @@ display_source_t *display_source_add(display_t *display,
                 source->cb = cb;
                 source->user_data = user_data;
                 source->priority = priority;
-                source->refresh_ms = (refresh_ms > 0) ?
-                                     refresh_ms :
-                                     DISPLAY_SOURCE_DEFAULT_REFRESH_MS;
+                source->refresh_ms = (refresh_ms > 0) ? refresh_ms : DISPLAY_SOURCE_DEFAULT_REFRESH_MS;
                 source->name = name;
                 // Due immediately so the first text appears promptly.
                 source->next_due_us = esp_timer_get_time();
-                source->have_text = false;
+                source->last_text[0] = '\0';
 
-                // Insert at tail so registration order is preserved;
-                // ties in priority are broken in favour of earlier
-                // registration.
-                display_source_t *tail = NULL;
+                // Insert in priority order; ties keep registration
+                // order, so a source added later with the same
+                // priority comes after one added earlier.  The list
+                // is kept sorted so pick_source_text() can simply
+                // walk it front-to-back.
+                display_source_t *prev = NULL;
                 display_source_t *iter;
                 SLIST_FOREACH(iter, &display->sources, next) {
-                    tail = iter;
+                    if (iter->priority > source->priority) {
+                        break;
+                    }
+                    prev = iter;
                 }
-                if (tail == NULL) {
+                if (prev == NULL) {
                     SLIST_INSERT_HEAD(&display->sources, source, next);
                 } else {
-                    SLIST_INSERT_AFTER(tail, source, next);
+                    SLIST_INSERT_AFTER(prev, source, next);
                 }
                 display->num_sources++;
 
-                ESP_LOGI(TAG, "source '%s' added (priority %" PRId32
-                         ", refresh %" PRIu32 " ms).",
+                ESP_LOGI(TAG, "source '%s' added (priority %d, refresh %d ms).",
                          name ? name : "(unnamed)", priority,
                          source->refresh_ms);
             } else {
@@ -644,7 +635,6 @@ int32_t display_source_set_refresh(display_source_t *source,
     return err;
 }
 
-// Modify the priority of a source of display.
 int32_t display_source_set_priority(display_source_t *source,
                                     int32_t priority)
 {
@@ -655,8 +645,39 @@ int32_t display_source_set_priority(display_source_t *source,
         CONTEXT_LOCK(g_context.lock, "display_source_set_priority()");
 
         err = -ESP_ERR_INVALID_ARG;
-        if (source) {
+        if (source && source->display) {
+            display_t *display = source->display;
+
+            // Remove from its current position.
+            display_source_t *prev = NULL;
+            display_source_t *iter;
+            SLIST_FOREACH(iter, &display->sources, next) {
+                if (iter == source) {
+                    if (prev == NULL) {
+                        SLIST_REMOVE_HEAD(&display->sources, next);
+                    } else {
+                        SLIST_REMOVE_AFTER(prev, next);
+                    }
+                    break;
+                }
+                prev = iter;
+            }
+
+            // Re-insert in the new position.
             source->priority = priority;
+            prev = NULL;
+            SLIST_FOREACH(iter, &display->sources, next) {
+                if (iter->priority > source->priority) {
+                    break;
+                }
+                prev = iter;
+            }
+            if (prev == NULL) {
+                SLIST_INSERT_HEAD(&display->sources, source, next);
+            } else {
+                SLIST_INSERT_AFTER(prev, source, next);
+            }
+
             err = ESP_OK;
         }
 
