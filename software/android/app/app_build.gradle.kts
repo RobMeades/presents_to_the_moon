@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.presents_to_the_moon"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1.1
-        versionName = "1.1"
+        versionCode = 1.0
+        versionName = "1.0"
     }
 
     buildTypes {

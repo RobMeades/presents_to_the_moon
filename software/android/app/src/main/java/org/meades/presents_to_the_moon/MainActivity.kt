@@ -48,7 +48,9 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.*
+import java.text.SimpleDateFormat
 import java.util.*
+import kotlin.math.abs
 
 class MainActivity : ComponentActivity() {
 
@@ -61,16 +63,17 @@ class MainActivity : ComponentActivity() {
     var connectionStatus = mutableStateOf("Disconnected")
     var deviceStateName = mutableStateOf("UNKNOWN")
     var currentHeightMm = mutableStateOf<String?>(null)
+    var t0EpochSec = mutableStateOf<Long?>(null)
 
     // Config values (Null until read from connected device)
     var emergencyStop = mutableStateOf<Boolean?>(null)
     var offPeakEnable = mutableStateOf<Boolean?>(null)
     var offPeakStartSec = mutableStateOf<Int?>(null)
-    var offPeakDurationSec = mutableStateOf<String?>(null)
+    var offPeakDurationSec = mutableStateOf<Int?>(null)
     var offPeakLaunchIntervalSec = mutableStateOf<String?>(null)
     var peakEnable = mutableStateOf<Boolean?>(null)
     var peakStartSec = mutableStateOf<Int?>(null)
-    var peakDurationSec = mutableStateOf<String?>(null)
+    var peakDurationSec = mutableStateOf<Int?>(null)
     var peakLaunchIntervalSec = mutableStateOf<String?>(null)
     var heightMaxMm = mutableStateOf<String?>(null)
     var speedMmSec = mutableStateOf<String?>(null)
@@ -113,7 +116,8 @@ class MainActivity : ComponentActivity() {
         "COMMAND_TRACK_NUMBER_RESETTING" to UUID.fromString("0000FFF6-0000-1000-8000-00805F9B34FB"),
         "MUTE" to UUID.fromString("0000FFF7-0000-1000-8000-00805F9B34FB"),
         "STATE" to UUID.fromString("0000FFF8-0000-1000-8000-00805F9B34FB"),
-        "HEIGHT_CURRENT_MM" to UUID.fromString("0000FFF9-0000-1000-8000-00805F9B34FB")
+        "HEIGHT_CURRENT_MM" to UUID.fromString("0000FFF9-0000-1000-8000-00805F9B34FB"),
+        "T0" to UUID.fromString("0000FFFA-0000-1000-8000-00805F9B34FB")
     )
 
     // Unified list controlling the exact order characteristics are read/updated
@@ -121,6 +125,7 @@ class MainActivity : ComponentActivity() {
         "EMERGENCY_STOP_ENABLE",
         "STATE",
         "HEIGHT_CURRENT_MM",
+        "T0",
         "OFF_PEAK",
         "OFF_PEAK_START_SECONDS_SINCE_MIDNIGHT",
         "OFF_PEAK_DURATION_SECONDS",
@@ -140,7 +145,7 @@ class MainActivity : ComponentActivity() {
 
     private val launcherStates = listOf(
         "NULL", "HEIGHT_UNKNOWN", "READY", "MOVE_UP", "MOVE_DOWN",
-        "RUN", "RUNNING_SKITTERING", "RUNNING_WAKING", "RUNNING_JUMPING",
+        "RUN", "RUNNING_DELUGE", "RUNNING_IGNITION", "RUNNING_LAUNCHING",
         "RUNNING_DANGLING", "RUNNING_RESETTING", "HALT"
     )
 
@@ -165,6 +170,7 @@ class MainActivity : ComponentActivity() {
                         connectionStatus = connectionStatus.value,
                         deviceState = deviceStateName.value,
                         currentHeight = currentHeightMm.value,
+                        t0EpochSec = t0EpochSec.value,
                         emergencyStop = emergencyStop.value,
                         offPeakEnable = offPeakEnable.value,
                         offPeakStartSec = offPeakStartSec.value,
@@ -318,34 +324,35 @@ class MainActivity : ComponentActivity() {
         ) {
             isReading = false
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                val intVal = parseLittleEndianInt(value)
+                val longVal = parseLittleEndianLong(value)
                 val uuid = characteristic.uuid
 
                 when (uuid) {
-                    CHAR_UUIDS["EMERGENCY_STOP_ENABLE"] -> emergencyStop.value = intVal != 0
+                    CHAR_UUIDS["EMERGENCY_STOP_ENABLE"] -> emergencyStop.value = longVal.toInt() != 0
                     CHAR_UUIDS["STATE"] -> {
-                        if (intVal in launcherStates.indices) {
-                            deviceStateName.value = launcherStates[intVal]
+                        if (longVal in launcherStates.indices) {
+                            deviceStateName.value = launcherStates[longVal.toInt()]
                         }
                     }
                     CHAR_UUIDS["HEIGHT_CURRENT_MM"] -> {
-                        currentHeightMm.value = if (intVal == -1) "Unknown" else "$intVal mm"
+                        currentHeightMm.value = if (longVal.toInt() == -1) "Unknown" else "$longVal mm"
                     }
-                    CHAR_UUIDS["OFF_PEAK"] -> offPeakEnable.value = intVal != 0
-                    CHAR_UUIDS["OFF_PEAK_START_SECONDS_SINCE_MIDNIGHT"] -> offPeakStartSec.value = intVal
-                    CHAR_UUIDS["OFF_PEAK_DURATION_SECONDS"] -> offPeakDurationSec.value = intVal.toString()
-                    CHAR_UUIDS["OFF_PEAK_LAUNCH_INTERVAL_SECONDS"] -> offPeakLaunchIntervalSec.value = intVal.toString()
-                    CHAR_UUIDS["PEAK"] -> peakEnable.value = intVal != 0
-                    CHAR_UUIDS["PEAK_START_SECONDS_SINCE_MIDNIGHT"] -> peakStartSec.value = intVal
-                    CHAR_UUIDS["PEAK_DURATION_SECONDS"] -> peakDurationSec.value = intVal.toString()
-                    CHAR_UUIDS["PEAK_LAUNCH_INTERVAL_SECONDS"] -> peakLaunchIntervalSec.value = intVal.toString()
-                    CHAR_UUIDS["HEIGHT_MAX_MM"] -> heightMaxMm.value = intVal.toString()
-                    CHAR_UUIDS["SPEED_MM_PER_SECOND"] -> speedMmSec.value = intVal.toString()
-                    CHAR_UUIDS["COMMAND_TRACK_NUMBER_DELUGE"] -> delugeTrack.value = intVal.toString()
-                    CHAR_UUIDS["COMMAND_TRACK_NUMBER_LAUNCHING"] -> launchingTrack.value = intVal.toString()
-                    CHAR_UUIDS["COMMAND_TRACK_NUMBER_DANGLING"] -> danglingTrack.value = intVal.toString()
-                    CHAR_UUIDS["COMMAND_TRACK_NUMBER_RESETTING"] -> resettingTrack.value = intVal.toString()
-                    CHAR_UUIDS["MUTE"] -> muteEnable.value = intVal != 0
+                    CHAR_UUIDS["T0"] -> t0EpochSec.value = longVal
+                    CHAR_UUIDS["OFF_PEAK"] -> offPeakEnable.value = longVal.toInt() != 0
+                    CHAR_UUIDS["OFF_PEAK_START_SECONDS_SINCE_MIDNIGHT"] -> offPeakStartSec.value = longVal.toInt()
+                    CHAR_UUIDS["OFF_PEAK_DURATION_SECONDS"] -> offPeakDurationSec.value = longVal.toInt()
+                    CHAR_UUIDS["OFF_PEAK_LAUNCH_INTERVAL_SECONDS"] -> offPeakLaunchIntervalSec.value = longVal.toString()
+                    CHAR_UUIDS["PEAK"] -> peakEnable.value = longVal.toInt() != 0
+                    CHAR_UUIDS["PEAK_START_SECONDS_SINCE_MIDNIGHT"] -> peakStartSec.value = longVal.toInt()
+                    CHAR_UUIDS["PEAK_DURATION_SECONDS"] -> peakDurationSec.value = longVal.toInt()
+                    CHAR_UUIDS["PEAK_LAUNCH_INTERVAL_SECONDS"] -> peakLaunchIntervalSec.value = longVal.toString()
+                    CHAR_UUIDS["HEIGHT_MAX_MM"] -> heightMaxMm.value = longVal.toString()
+                    CHAR_UUIDS["SPEED_MM_PER_SECOND"] -> speedMmSec.value = longVal.toString()
+                    CHAR_UUIDS["COMMAND_TRACK_NUMBER_DELUGE"] -> delugeTrack.value = longVal.toString()
+                    CHAR_UUIDS["COMMAND_TRACK_NUMBER_LAUNCHING"] -> launchingTrack.value = longVal.toString()
+                    CHAR_UUIDS["COMMAND_TRACK_NUMBER_DANGLING"] -> danglingTrack.value = longVal.toString()
+                    CHAR_UUIDS["COMMAND_TRACK_NUMBER_RESETTING"] -> resettingTrack.value = longVal.toString()
+                    CHAR_UUIDS["MUTE"] -> muteEnable.value = longVal.toInt() != 0
                 }
             }
             processNextRead()
@@ -358,6 +365,7 @@ class MainActivity : ComponentActivity() {
             while (isActive && bluetoothGatt != null) {
                 queueRead(CHAR_UUIDS["STATE"])
                 queueRead(CHAR_UUIDS["HEIGHT_CURRENT_MM"])
+                queueRead(CHAR_UUIDS["T0"])
                 delay(3000)
             }
         }
@@ -399,17 +407,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun parseLittleEndianInt(bytes: ByteArray): Int {
-        if (bytes.isEmpty()) return 0
-        return when (bytes.size) {
-            1 -> bytes[0].toInt() and 0xFF
-            2 -> ((bytes[1].toInt() and 0xFF) shl 8) or (bytes[0].toInt() and 0xFF)
-            4 -> ((bytes[3].toInt() and 0xFF) shl 24) or
-                    ((bytes[2].toInt() and 0xFF) shl 16) or
-                    ((bytes[1].toInt() and 0xFF) shl 8) or
-                    (bytes[0].toInt() and 0xFF)
-            else -> bytes[0].toInt()
+    private fun parseLittleEndianLong(bytes: ByteArray): Long {
+        if (bytes.isEmpty()) return 0L
+        var result = 0L
+        val count = minOf(bytes.size, 8)
+        for (i in 0 until count) {
+            result = result or ((bytes[i].toLong() and 0xFFL) shl (i * 8))
         }
+        return result
     }
 
     private fun interruptAndPrepareForAction() {
@@ -479,6 +484,27 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private fun formatEpochToClockTime(epochSec: Long): String {
+    val formatter = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+    return formatter.format(Date(epochSec * 1000L))
+}
+
+private fun formatT0Display(t0EpochSec: Long?, nowEpochSec: Long): String {
+    if (t0EpochSec == null || t0EpochSec <= 0L || t0EpochSec == Long.MAX_VALUE) {
+        return "T0: --"
+    }
+    val absTimeStr = formatEpochToClockTime(t0EpochSec)
+    val deltaSec = t0EpochSec - nowEpochSec
+    // Future: deltaSec > 0 -> "T-HH:MM:SS"; Past: deltaSec <= 0 -> "T+HH:MM:SS"
+    val sign = if (deltaSec > 0L) "-" else "+"
+    val magSec = abs(deltaSec)
+    val hours = magSec / 3600L
+    val minutes = (magSec % 3600L) / 60L
+    val seconds = magSec % 60L
+    val countdownStr = String.format(Locale.US, "T%s%02d:%02d:%02d", sign, hours, minutes, seconds)
+    return "T0: $absTimeStr ($countdownStr)"
+}
+
 private fun formatSecondsToHhMm(secondsSinceMidnight: Int?): String {
     if (secondsSinceMidnight == null) return ""
     val clamped = secondsSinceMidnight.coerceIn(0, 86399)
@@ -495,6 +521,26 @@ private fun parseHhMmToSeconds(hhMm: String): Int? {
     val minutes = parts[1].toIntOrNull() ?: return null
     if (hours !in 0..23 || minutes !in 0..59) return null
     return hours * 3600 + minutes * 60
+}
+
+private fun formatDurationToHhMm(durationSeconds: Int?): String {
+    if (durationSeconds == null) return ""
+    val nonNeg = durationSeconds.coerceAtLeast(0)
+    val hours = nonNeg / 3600
+    val minutes = (nonNeg % 3600) / 60
+    return String.format(Locale.US, "%02d:%02d", hours, minutes)
+}
+
+private fun parseDurationHhMmToSeconds(hhMm: String): Int? {
+    val trimmed = hhMm.trim()
+    val parts = trimmed.split(":")
+    if (parts.size != 2 || parts[0].isEmpty() || parts[1].length != 2) return null
+    val hours = parts[0].toIntOrNull() ?: return null
+    val minutes = parts[1].toIntOrNull() ?: return null
+    if (hours < 0 || minutes !in 0..59) return null
+    val totalSeconds = hours.toLong() * 3600L + minutes.toLong() * 60L
+    if (totalSeconds > Int.MAX_VALUE.toLong()) return null
+    return totalSeconds.toInt()
 }
 
 @Composable
@@ -775,12 +821,82 @@ fun CompactTimeHhMmRow(
 }
 
 @Composable
+fun CompactDurationHhMmRow(
+    label: String,
+    durationSeconds: Int?,
+    isConnected: Boolean,
+    onSaveSeconds: (Int) -> Unit,
+    confirmAndExecute: (String, String, () -> Unit) -> Unit,
+    onFieldFocusChange: (Boolean) -> Unit = {}
+) {
+    val formattedInitial = remember(durationSeconds) { formatDurationToHhMm(durationSeconds) }
+    var textValue by remember(formattedInitial) { mutableStateOf(formattedInitial) }
+    val focusManager = LocalFocusManager.current
+    val parsedSeconds = parseDurationHhMmToSeconds(textValue)
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (isConnected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+        )
+
+        BasicTextField(
+            value = textValue,
+            onValueChange = { textValue = it },
+            enabled = isConnected,
+            singleLine = true,
+            textStyle = MaterialTheme.typography.bodyMedium.copy(
+                color = if (isConnected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+            ),
+            modifier = Modifier
+                .width(70.dp)
+                .background(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.shapes.small)
+                .padding(horizontal = 8.dp, vertical = 6.dp)
+                .onFocusChanged { focusState ->
+                    onFieldFocusChange(focusState.isFocused)
+                    if (!focusState.isFocused) {
+                        textValue = formattedInitial
+                    }
+                }
+        )
+
+        Button(
+            onClick = {
+                parsedSeconds?.let { secVal ->
+                    val normalizedHhMm = formatDurationToHhMm(secVal)
+                    confirmAndExecute(
+                        "Update $label",
+                        "Are you sure you want to update $label to $normalizedHhMm ($secVal s)?"
+                    ) {
+                        focusManager.clearFocus()
+                        onSaveSeconds(secVal)
+                    }
+                }
+            },
+            enabled = isConnected && parsedSeconds != null && durationSeconds != null,
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+            modifier = Modifier.height(36.dp)
+        ) {
+            Text("Save", style = MaterialTheme.typography.labelMedium)
+        }
+    }
+}
+
+@Composable
 fun ExpandablePeriodSection(
     title: String,
     enableLabel: String,
     enabledValue: Boolean?,
     startSecValue: Int?,
-    durationSecValue: String?,
+    durationSecValue: Int?,
     intervalSecValue: String?,
     isConnected: Boolean,
     isExpanded: Boolean,
@@ -827,7 +943,8 @@ fun ExpandablePeriodSection(
             verticalAlignment = Alignment.CenterVertically
         ) {
             val startDisplay = if (startSecValue != null) formatSecondsToHhMm(startSecValue) else "--:--"
-            val summary = "Start: $startDisplay • Dur: ${durationSecValue ?: "--"}s • Int: ${intervalSecValue ?: "--"}s"
+            val durationDisplay = if (durationSecValue != null) formatDurationToHhMm(durationSecValue) else "--:--"
+            val summary = "Start: $startDisplay • Duration: $durationDisplay • Interval: ${intervalSecValue ?: "--"}s"
             Text(
                 text = summary,
                 style = MaterialTheme.typography.bodySmall,
@@ -851,11 +968,11 @@ fun ExpandablePeriodSection(
                     confirmAndExecute = confirmAndExecute,
                     onFieldFocusChange = ::childFocusCallback
                 )
-                CompactParamRow(
-                    label = "$title Duration (sec)",
-                    value = durationSecValue,
+                CompactDurationHhMmRow(
+                    label = "$title Duration (HH:MM)",
+                    durationSeconds = durationSecValue,
                     isConnected = isConnected,
-                    onSave = onSaveDurationSec,
+                    onSaveSeconds = onSaveDurationSec,
                     confirmAndExecute = confirmAndExecute,
                     onFieldFocusChange = ::childFocusCallback
                 )
@@ -877,14 +994,15 @@ fun MainScreen(
     connectionStatus: String,
     deviceState: String,
     currentHeight: String?,
+    t0EpochSec: Long?,
     emergencyStop: Boolean?,
     offPeakEnable: Boolean?,
     offPeakStartSec: Int?,
-    offPeakDurationSec: String?,
+    offPeakDurationSec: Int?,
     offPeakLaunchIntervalSec: String?,
     peakEnable: Boolean?,
     peakStartSec: Int?,
-    peakDurationSec: String?,
+    peakDurationSec: Int?,
     peakLaunchIntervalSec: String?,
     heightMaxMm: String?,
     speedMmSec: String?,
@@ -901,6 +1019,14 @@ fun MainScreen(
     val isConnected = (connectionStatus == "Connected")
     val isEStopActive = emergencyStop == true
     val areMotorsEnabled = isConnected && !isEStopActive
+
+    var nowEpochSec by remember { mutableLongStateOf(System.currentTimeMillis() / 1000L) }
+    LaunchedEffect(Unit) {
+        while (isActive) {
+            nowEpochSec = System.currentTimeMillis() / 1000L
+            delay(1000L)
+        }
+    }
 
     var offPeakExpanded by remember { mutableStateOf(false) }
     var peakExpanded by remember { mutableStateOf(false) }
@@ -962,7 +1088,20 @@ fun MainScreen(
             Column(modifier = Modifier.padding(4.dp)) {
                 Text("Connection: $connectionStatus", style = MaterialTheme.typography.bodyLarge)
                 Text("Device State: $deviceState", style = MaterialTheme.typography.titleMedium, color = Color.Red)
-                Text("Current Height: ${currentHeight ?: "--"}", style = MaterialTheme.typography.bodyMedium)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Current Height: ${currentHeight ?: "--"}",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        formatT0Display(t0EpochSec, nowEpochSec),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
                 if (isEStopActive) {
                     Text("EMERGENCY STOP ENGAGED", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.error)
                 }

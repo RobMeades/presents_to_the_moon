@@ -25,5 +25,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Spider Launcher"
+rootProject.name = "Presents To The Moon"
 include(":app")
