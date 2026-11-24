@@ -329,7 +329,8 @@ typedef enum {
     COMMAND_TYPE_WRITE_ONLY_BOOLEAN,
     COMMAND_TYPE_READ_WRITE_UINT32,
     COMMAND_TYPE_READ_WRITE_BOOLEAN,
-    COMMAND_TYPE_READ_ONLY
+    COMMAND_TYPE_READ_ONLY_UINT32,
+    COMMAND_TYPE_READ_ONLY_UINT64
 } command_type_t;
 
 // Commands to the launcher.
@@ -361,6 +362,7 @@ typedef enum {
     COMMAND_MUTE,                                  // read/write, Boolean
     COMMAND_STATE,                                 // read only, uint32_t
     COMMAND_HEIGHT_CURRENT_MM,                     // read only, uint32_t
+    COMMAND_T0,                               // read only, uint64_t
     COMMAND_NUMBER_OF
 } command_t;
 
@@ -439,7 +441,8 @@ typedef struct {
     activity_period_t peak;
     launcher_timer_t timer_auto;
     int32_t auto_period_seconds;
-    time_t next_t0;
+    time_t pending_t0;
+    time_t t0;
     nvs_shadow_t nvs_shadow;
     launcher_motor_t motor;
 } launcher_t;
@@ -461,7 +464,7 @@ typedef struct {
 // Command queue contents.
 typedef struct {
     command_t command;
-    uint32_t value;
+    uint64_t value;
     bool read_not_write;
 } command_contents_t;
 
@@ -477,7 +480,7 @@ typedef int (*characteristic_cb_t) (uint16_t conn_handle, uint16_t attr_handle,
                                     struct ble_gatt_access_ctxt *ctxt, void *arg);
 
 // Function prototype for a command handler (which ultimate does the work).
-typedef void (*command_handler_t) (launcher_t *launcher, uint32_t value, bool read_not_write);
+typedef void (*command_handler_t) (launcher_t *launcher, uint64_t value, bool read_not_write);
 
 // Properties of a command we advertise as a BLE characteristic;
 // this is the basis of g_command_data_list[], which is populated way
@@ -508,7 +511,8 @@ static const struct ble_gap_adv_params g_ble_adv_params = {
 static context_t g_context = {.service_uuid = BLE_UUID16_INIT(SERVICE_UUID),
                               .ble_connection_handle = BLE_HS_CONN_HANDLE_NONE,
                               .launcher.height_target_mm = POSITION_UNKNOWN,
-                              .launcher.next_t0 = NO_COUNTDOWN};
+                              .launcher.pending_t0 = NO_COUNTDOWN,
+                              .launcher.t0 = NO_COUNTDOWN};
 
 // Retained RAM storage
 FGR_RRAM_DEFINE(retained_ram_t, retained_ram);
@@ -620,11 +624,11 @@ static bool display_countdown_cb(char *buffer, size_t buffer_size, void *user_da
     context_t *context = (context_t *) user_data;
     launcher_t *launcher = &context->launcher;
 
-    time_t next_t0 = __atomic_load_n(&launcher->next_t0, __ATOMIC_RELAXED);
-    if (next_t0 != NO_COUNTDOWN) {
+    time_t t0 = __atomic_load_n(&launcher->t0, __ATOMIC_RELAXED);
+    if (t0 != NO_COUNTDOWN) {
         time_t now;
         time(&now);
-        if (format_duration(now - next_t0, buffer, buffer_size) != NULL) {
+        if (format_duration(now - t0, buffer, buffer_size) != NULL) {
             counting_down = true;
         }
     }
@@ -1651,6 +1655,14 @@ static bool timer_has_expired(launcher_timer_t *timer)
     return elapsed_us > timer->duration_us;
 }
 
+// How much time is left on a timer.
+static int64_t timer_remaining_us(launcher_timer_t *timer)
+{
+    int64_t now_us = esp_timer_get_time();
+    int64_t elapsed_us = now_us - timer->start_us;
+    return  timer->duration_us - elapsed_us;
+}
+
 // Return the offset from the start of a run to the T0 time in seconds.
 static int32_t t0_offset(launcher_t *launcher)
 {
@@ -1668,7 +1680,8 @@ static int32_t t0_offset(launcher_t *launcher)
 static void auto_timer_reset(launcher_t *launcher)
 {
     launcher->timer_auto.duration_us = 0;
-    __atomic_store_n(&launcher->next_t0, NO_COUNTDOWN, __ATOMIC_RELAXED);
+    __atomic_store_n(&launcher->t0, NO_COUNTDOWN, __ATOMIC_RELAXED);
+    __atomic_store_n(&launcher->pending_t0, NO_COUNTDOWN, __ATOMIC_RELAXED);
 }
 
 // Check if we are inside an automatic activity period
@@ -1692,7 +1705,7 @@ static bool auto_timer_has_expired(launcher_t *launcher)
     bool has_expired = false;
     nvs_shadow_t *nvs_shadow = &launcher->nvs_shadow;
 
-    time_t next_t0 = NO_COUNTDOWN;
+    time_t t0 = NO_COUNTDOWN;
     if (nvs_shadow->off_peak_enabled || nvs_shadow->peak_enabled) {
         // Get the number of seconds since [local] midnight
         time_t now;
@@ -1712,25 +1725,25 @@ static bool auto_timer_has_expired(launcher_t *launcher)
         int32_t launch_interval_seconds = 0;
         time_t start_time[] = {NO_COUNTDOWN, NO_COUNTDOWN};
         int32_t offset_seconds = t0_offset(launcher);
-        time_t possible_t0 = seconds_since_midnight + offset_seconds;
+        time_t possible_t0_seconds_since_midnight = seconds_since_midnight + offset_seconds;
         if (nvs_shadow->off_peak_enabled) {
             start_time[0] = nvs_shadow->off_peak_start_seconds_since_midnight + midnight;
-            if (auto_is_active(possible_t0,
+            if (auto_is_active(possible_t0_seconds_since_midnight,
                                nvs_shadow->off_peak_start_seconds_since_midnight,
                                nvs_shadow->off_peak_duration_seconds)) {
                 // Inside the off-peak launch period
                 launch_interval_seconds = nvs_shadow->off_peak_launch_interval_seconds;
-                next_t0 = possible_t0 + midnight;
+                t0 = possible_t0_seconds_since_midnight + midnight;
             }
         }
         if (nvs_shadow->peak_enabled) {
             start_time[1] = nvs_shadow->peak_start_seconds_since_midnight + midnight;
-            if (auto_is_active(possible_t0,
+            if (auto_is_active(possible_t0_seconds_since_midnight,
                                nvs_shadow->peak_start_seconds_since_midnight,
                                nvs_shadow->peak_duration_seconds)) {
                 // Peak trumps off-peak
                 launch_interval_seconds = nvs_shadow->peak_launch_interval_seconds;
-                next_t0 = possible_t0 + midnight;
+                t0 = possible_t0_seconds_since_midnight + midnight;
             }
         }
 
@@ -1743,13 +1756,16 @@ static bool auto_timer_has_expired(launcher_t *launcher)
             } else {
                 //  Timer was already set, see if it has expired
                 has_expired = timer_has_expired(&launcher->timer_auto);
+                if (!has_expired) {
+                    t0 += timer_remaining_us(&launcher->timer_auto) / 1000000;
+                }
             }
             if ((launcher->timer_auto.duration_us == 0) || has_expired) {
                 // No timer was set or it has expired, set a new timeout
                 // (it will be cancelled next time we come in here if we
                 // have gone beyond the end of an activity period)
                 timer_start_us(&launcher->timer_auto, ((int64_t) launch_interval_seconds) * 1000000);
-                next_t0 += launch_interval_seconds;
+                t0 += launch_interval_seconds;
             }
         } else {
             // Not in an activity period, set the auto timer duration
@@ -1757,7 +1773,7 @@ static bool auto_timer_has_expired(launcher_t *launcher)
             launcher->timer_auto.duration_us = 0;
         }
 
-        if (next_t0 == NO_COUNTDOWN) {
+        if (t0 == NO_COUNTDOWN) {
             // Not in an active period at the moment: set the
             // T0 to when the next one will start
             time_t _start_time = start_time[0];
@@ -1765,15 +1781,13 @@ static bool auto_timer_has_expired(launcher_t *launcher)
                 _start_time = start_time[1];
             }
             if (_start_time != NO_COUNTDOWN) {
-                next_t0 = _start_time + offset_seconds;
+                t0 = _start_time + offset_seconds;
             }
         }
-    }
 
-    if (launcher->state == LAUNCHER_STATE_READY) {
-        // If we are ready, store the next T0 so that
-        // display_countdown_cb() can use it
-        __atomic_store_n(&launcher->next_t0, next_t0,  __ATOMIC_RELAXED);
+        // Update the pending T0 - it will be moved to T0
+        // by the state machine
+        __atomic_store_n(&launcher->pending_t0, t0, __ATOMIC_RELAXED);
     }
 
     return has_expired;
@@ -1796,6 +1810,8 @@ static void auto_cb(void *handle, void *arg)
         } else {
             // Couldn't start, try again in a shorter time
             launcher->auto_period_seconds = AUTO_MODE_RETRY_TIME_SECONDS;
+            time_t pending_t0 = __atomic_load_n(&launcher->pending_t0, __ATOMIC_RELAXED);
+            __atomic_store_n(&launcher->pending_t0, pending_t0 - AUTO_MODE_RETRY_TIME_SECONDS, __ATOMIC_RELAXED);
             ESP_LOGI(TAG, "unable to auto-run in state %s, retrying in %d second(s).",
                      g_launcher_state_name[launcher->state], launcher->auto_period_seconds);
         }
@@ -1913,12 +1929,12 @@ static launcher_state_t advance_state_commanded_run(launcher_t *launcher,
 
     if (height_mm < height_max_mm) {
         // If there was no countdown, set one now
-        time_t next_t0 = __atomic_load_n(&launcher->next_t0, __ATOMIC_RELAXED);
-        if (next_t0 == NO_COUNTDOWN) {
+        time_t t0 = __atomic_load_n(&launcher->t0, __ATOMIC_RELAXED);
+        if (t0 == NO_COUNTDOWN) {
             time_t t0_seconds;
             time(&t0_seconds);
             t0_seconds += t0_offset(launcher);
-            __atomic_store_n(&launcher->next_t0, t0_seconds, __ATOMIC_RELAXED);
+            __atomic_store_n(&launcher->t0, t0_seconds, __ATOMIC_RELAXED);
         }
         // Set up the deluge audio for a duration
         uint32_t track_number = nvs_shadow->track_number_deluge;
@@ -2125,7 +2141,7 @@ static launcher_state_t advance_state_running_resetting(launcher_t *launcher,
         launcher->height_target_mm = POSITION_UNKNOWN;
         motor_stop(&launcher->motor, TMC5160_IDLE_CURRENT_MA, false);
         print_height(height_mm);
-        __atomic_store_n(&launcher->next_t0, NO_COUNTDOWN, __ATOMIC_RELAXED);
+        __atomic_store_n(&launcher->t0, NO_COUNTDOWN, __ATOMIC_RELAXED);
         next_state = LAUNCHER_STATE_POSITION_UNKNOWN;
     }
 
@@ -2221,6 +2237,9 @@ static launcher_state_t advance_state(launcher_t *launcher, launcher_state_t com
                                  commanded_state, launcher->state);
                     break;
                 }
+                // If we're ready we can move the pending T0 to be the real T0
+                time_t pending_t0 = __atomic_load_n(&launcher->pending_t0, __ATOMIC_RELAXED);
+                __atomic_store_n(&launcher->t0, pending_t0, __ATOMIC_RELAXED);
             break;
             case LAUNCHER_STATE_MOVE_UP:
                 if (commanded_state == LAUNCHER_STATE_MOVE_UP) {
@@ -2413,7 +2432,7 @@ static void launcher_cb(void *handle, void *arg)
  * -------------------------------------------------------------- */
 
 // Handle the "launch now" command.
-static void handler_launch_now(launcher_t *launcher, uint32_t unused, bool read_not_write)
+static void handler_launch_now(launcher_t *launcher, uint64_t unused, bool read_not_write)
 {
     (void) unused;
     (void) read_not_write;
@@ -2424,7 +2443,7 @@ static void handler_launch_now(launcher_t *launcher, uint32_t unused, bool read_
 }
 
 // Handle the "up" command.
-static void handler_up(launcher_t *launcher, uint32_t enable, bool read_not_write)
+static void handler_up(launcher_t *launcher, uint64_t enable, bool read_not_write)
 {
     launcher_state_t state = LAUNCHER_STATE_HALT;
 
@@ -2438,7 +2457,7 @@ static void handler_up(launcher_t *launcher, uint32_t enable, bool read_not_writ
 }
 
 // Handle the "down" command.
-static void handler_down(launcher_t *launcher, uint32_t enable, bool read_not_write)
+static void handler_down(launcher_t *launcher, uint64_t enable, bool read_not_write)
 {
     launcher_state_t state = LAUNCHER_STATE_HALT;
 
@@ -2453,7 +2472,7 @@ static void handler_down(launcher_t *launcher, uint32_t enable, bool read_not_wr
 }
 
 // Handle the "this is ground level" command.
-static void handler_this_is_ground_level(launcher_t *launcher, uint32_t unused, bool read_not_write)
+static void handler_this_is_ground_level(launcher_t *launcher, uint64_t unused, bool read_not_write)
 {
     launcher_motor_t *motor = &launcher->motor;
 
@@ -2483,7 +2502,7 @@ static void handler_this_is_ground_level(launcher_t *launcher, uint32_t unused, 
 }
 
 // Handle the "this is height max" command.
-static void handler_this_is_height_max(launcher_t *launcher, uint32_t unused, bool read_not_write)
+static void handler_this_is_height_max(launcher_t *launcher, uint64_t unused, bool read_not_write)
 {
     launcher_motor_t *motor = &launcher->motor;
     nvs_shadow_t *nvs_shadow = &launcher->nvs_shadow;
@@ -2516,7 +2535,7 @@ static void handler_this_is_height_max(launcher_t *launcher, uint32_t unused, bo
 }
 
 // Handle the "reset to defaults" command.
-static void handler_reset_to_defaults(launcher_t *launcher, uint32_t unused, bool read_not_write)
+static void handler_reset_to_defaults(launcher_t *launcher, uint64_t unused, bool read_not_write)
 {
     (void) unused;
     (void) read_not_write;
@@ -2556,7 +2575,7 @@ static void handler_reset_to_defaults(launcher_t *launcher, uint32_t unused, boo
 }
 
 // Handle the "emergency stop enable" command.
-static void handler_emergency_stop_enable(launcher_t *launcher, uint32_t enable, bool read_not_write)
+static void handler_emergency_stop_enable(launcher_t *launcher, uint64_t enable, bool read_not_write)
 {
     // Set the state in retained RAM
     retained_ram_t retained_ram = DEFAULTS_RETAINED_RAM;
@@ -2585,17 +2604,17 @@ static void handler_emergency_stop_enable(launcher_t *launcher, uint32_t enable,
 }
 
 // Handle the "play track" command.
-static void handler_play_track(launcher_t *launcher, uint32_t track_number, bool read_not_write)
+static void handler_play_track(launcher_t *launcher, uint64_t track_number, bool read_not_write)
 {
     (void) launcher;
     (void) read_not_write;
 
     // Play the track
-    audio_play_track(track_number);
+    audio_play_track((uint32_t) track_number);
 }
 
 // Handle the "enable off peak" command.
-static void handler_off_peak_enable(launcher_t *launcher, uint32_t enable, bool read_not_write)
+static void handler_off_peak_enable(launcher_t *launcher, uint64_t enable, bool read_not_write)
 {
     if (!read_not_write) {
         // Write the new setting to NVS
@@ -2608,40 +2627,40 @@ static void handler_off_peak_enable(launcher_t *launcher, uint32_t enable, bool 
 }
 
 // Handle the "off peak start" command.
-static void handler_off_peak_start_seconds_since_midnight(launcher_t *launcher, uint32_t seconds_since_midnight, bool read_not_write)
+static void handler_off_peak_start_seconds_since_midnight(launcher_t *launcher, uint64_t seconds_since_midnight, bool read_not_write)
 {
     if (!read_not_write) {
         // Write the new setting to NVS
-        nvs_off_peak_start_seconds_since_midnight_set(&launcher->nvs_shadow, seconds_since_midnight);
+        nvs_off_peak_start_seconds_since_midnight_set(&launcher->nvs_shadow, (uint32_t) seconds_since_midnight);
         // Reset the auto timer so that it gets recalculated
         auto_timer_reset(launcher);
     }
 }
 
 // Handle the "off peak duration" command.
-static void handler_off_peak_duration_seconds(launcher_t *launcher, uint32_t duration, bool read_not_write)
+static void handler_off_peak_duration_seconds(launcher_t *launcher, uint64_t duration, bool read_not_write)
 {
     if (!read_not_write) {
         // Write the new setting to NVS
-        nvs_off_peak_duration_seconds_set(&launcher->nvs_shadow, duration);
+        nvs_off_peak_duration_seconds_set(&launcher->nvs_shadow, (uint32_t) duration);
         // Reset the auto timer so that it gets recalculated
         auto_timer_reset(launcher);
     }
 }
 
 // Handle the "off peak launch interval" command.
-static void handler_off_peak_launch_interval_seconds(launcher_t *launcher, uint32_t interval, bool read_not_write)
+static void handler_off_peak_launch_interval_seconds(launcher_t *launcher, uint64_t interval, bool read_not_write)
 {
     if (!read_not_write) {
         // Write the new setting to NVS
-        nvs_off_peak_launch_interval_seconds_set(&launcher->nvs_shadow, interval);
+        nvs_off_peak_launch_interval_seconds_set(&launcher->nvs_shadow, (uint32_t) interval);
         // Reset the auto timer so that it gets recalculated
         auto_timer_reset(launcher);
     }
 }
 
 // Handle the "enable peak" command.
-static void handler_peak_enable(launcher_t *launcher, uint32_t enable, bool read_not_write)
+static void handler_peak_enable(launcher_t *launcher, uint64_t enable, bool read_not_write)
 {
     if (!read_not_write) {
         // Write the new setting to NVS
@@ -2654,94 +2673,94 @@ static void handler_peak_enable(launcher_t *launcher, uint32_t enable, bool read
 }
 
 // Handle the "peak start" command.
-static void handler_peak_start_seconds_since_midnight(launcher_t *launcher, uint32_t seconds_since_midnight, bool read_not_write)
+static void handler_peak_start_seconds_since_midnight(launcher_t *launcher, uint64_t seconds_since_midnight, bool read_not_write)
 {
     if (!read_not_write) {
         // Write the new setting to NVS
-        nvs_peak_start_seconds_since_midnight_set(&launcher->nvs_shadow, seconds_since_midnight);
+        nvs_peak_start_seconds_since_midnight_set(&launcher->nvs_shadow, (uint32_t) seconds_since_midnight);
         // Reset the auto timer so that it gets recalculated
         auto_timer_reset(launcher);
     }
 }
 
 // Handle the "peak duration" command.
-static void handler_peak_duration_seconds(launcher_t *launcher, uint32_t duration, bool read_not_write)
+static void handler_peak_duration_seconds(launcher_t *launcher, uint64_t duration, bool read_not_write)
 {
     if (!read_not_write) {
         // Write the new setting to NVS
-        nvs_peak_duration_seconds_set(&launcher->nvs_shadow, duration);
+        nvs_peak_duration_seconds_set(&launcher->nvs_shadow, (uint32_t) duration);
         // Reset the auto timer so that it gets recalculated
         auto_timer_reset(launcher);
     }
 }
 
 // Handle the "peak launch interval" command.
-static void handler_peak_launch_interval_seconds(launcher_t *launcher, uint32_t interval, bool read_not_write)
+static void handler_peak_launch_interval_seconds(launcher_t *launcher, uint64_t interval, bool read_not_write)
 {
     if (!read_not_write) {
         // Write the new setting to NVS
-        nvs_peak_launch_interval_seconds_set(&launcher->nvs_shadow, interval);
+        nvs_peak_launch_interval_seconds_set(&launcher->nvs_shadow, (uint32_t) interval);
         // Reset the auto timer so that it gets recalculated
         auto_timer_reset(launcher);
     }
 }
 
 // Handle the "height max" command.
-static void handler_height_max_mm(launcher_t *launcher, uint32_t height, bool read_not_write)
+static void handler_height_max_mm(launcher_t *launcher, uint64_t height, bool read_not_write)
 {
     if (!read_not_write) {
         // Write the new setting to NVS
-        nvs_height_max_mm_set(&launcher->nvs_shadow, height);
+        nvs_height_max_mm_set(&launcher->nvs_shadow, (uint32_t) height);
     }
 }
 
 // Handle the "speed" command.
-static void handler_speed_mm_per_second(launcher_t *launcher, uint32_t speed, bool read_not_write)
+static void handler_speed_mm_per_second(launcher_t *launcher, uint64_t speed, bool read_not_write)
 {
     if (!read_not_write) {
         // Write the new setting to NVS
-        nvs_speed_mm_per_second_set(&launcher->nvs_shadow, speed);
+        nvs_speed_mm_per_second_set(&launcher->nvs_shadow, (uint32_t) speed);
     }
 }
 
 // Handle the "track number deluge" command.
-static void handler_track_number_deluge(launcher_t *launcher, uint32_t track_number, bool read_not_write)
+static void handler_track_number_deluge(launcher_t *launcher, uint64_t track_number, bool read_not_write)
 {
     if (!read_not_write) {
         // Write the new setting to NVS
-        nvs_track_number_deluge_set(&launcher->nvs_shadow, track_number);
+        nvs_track_number_deluge_set(&launcher->nvs_shadow, (uint32_t) track_number);
     }
 }
 
 // Handle the "track number launching" command.
-static void handler_track_number_launching(launcher_t *launcher, uint32_t track_number, bool read_not_write)
+static void handler_track_number_launching(launcher_t *launcher, uint64_t track_number, bool read_not_write)
 {
     if (!read_not_write) {
         // Write the new setting to NVS
-        nvs_track_number_launching_set(&launcher->nvs_shadow, track_number);
+        nvs_track_number_launching_set(&launcher->nvs_shadow, (uint32_t) track_number);
     }
 }
 
 // Handle the "track number dangling" command.
-static void handler_track_number_dangling(launcher_t *launcher, uint32_t track_number, bool read_not_write)
+static void handler_track_number_dangling(launcher_t *launcher, uint64_t track_number, bool read_not_write)
 {
     if (!read_not_write) {
         // Write the new setting to NVS
-        nvs_track_number_dangling_set(&launcher->nvs_shadow, track_number);
+        nvs_track_number_dangling_set(&launcher->nvs_shadow, (uint32_t) track_number);
     }
 }
 
 // Handle the "track number resetting" command.
-static void handler_track_number_resetting(launcher_t *launcher, uint32_t track_number, bool read_not_write)
+static void handler_track_number_resetting(launcher_t *launcher, uint64_t track_number, bool read_not_write)
 {
     if (!read_not_write) {
         // Write the new setting to NVS
-        nvs_track_number_resetting_set(&launcher->nvs_shadow, track_number);
+        nvs_track_number_resetting_set(&launcher->nvs_shadow, (uint32_t) track_number);
     }
 }
 
 // Handle the "mute" command.
-static void handler_mute(launcher_t *launcher, uint32_t enable, bool read_not_write)
+static void handler_mute(launcher_t *launcher, uint64_t enable, bool read_not_write)
 {
     if (!read_not_write) {
         // Write the new setting to NVS
@@ -3106,9 +3125,6 @@ static int characteristic_off_peak_launch_interval_seconds_cb(uint16_t conn_hand
     return return_code;
 }
 
-
-
-
 // "enable peak" characteristic callback.
 static int characteristic_peak_enable_cb(uint16_t conn_handle, uint16_t attr_handle,
                                          struct ble_gatt_access_ctxt *ctxt, void *arg)
@@ -3447,7 +3463,7 @@ static int characteristic_height_current_mm_cb(uint16_t conn_handle, uint16_t at
 
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
         command_contents_t command_contents = {.command = COMMAND_HEIGHT_CURRENT_MM,
-                                               .value = (uint32_t) -1};
+                                               .value = (uint64_t) -1};
         // Read the current position from the TMC5160
         int32_t microsteps;
         int32_t err = tmc5160_get_position(motor->handle, &microsteps);
@@ -3465,6 +3481,27 @@ static int characteristic_height_current_mm_cb(uint16_t conn_handle, uint16_t at
     }
 
     CONTEXT_UNLOCK(context->lock, "characteristic_height_current_mm_cb");
+
+    return return_code;
+}
+
+// "Next T0" characteristic callback.
+static int characteristic_t0_cb(uint16_t conn_handle, uint16_t attr_handle,
+                                struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    int return_code = BLE_ATT_ERR_UNLIKELY;
+    context_t *context = (context_t *) arg;
+    launcher_t *launcher = &context->launcher;
+
+    CONTEXT_LOCK(context->lock, "characteristic_t0_cb");
+
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        command_contents_t command_contents = {.command = COMMAND_T0,
+                                               .value = (uint64_t) launcher->t0};
+        return_code = queue_command(conn_handle, attr_handle, ctxt, context, &command_contents);
+    }
+
+    CONTEXT_UNLOCK(context->lock, "characteristic_t0_cb");
 
     return return_code;
 }
@@ -3643,17 +3680,24 @@ static const command_data_t g_command_data_list[] = {{.type = COMMAND_TYPE_WRITE
                                                       .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_READ,
                                                       .handler = handler_mute
                                                      },
-                                                     {.type = COMMAND_TYPE_READ_ONLY,
+                                                     {.type = COMMAND_TYPE_READ_ONLY_UINT32,
                                                       .uuid = 0xFFF8,
                                                       .name = "STATE",
                                                       .characteristic_cb = characteristic_state_cb,
                                                       .flags = BLE_GATT_CHR_F_READ
                                                       // No handler for this one
                                                      },
-                                                     {.type = COMMAND_TYPE_READ_ONLY,
+                                                     {.type = COMMAND_TYPE_READ_ONLY_UINT32,
                                                       .uuid = 0xFFF9,
                                                       .name = "HEIGHT_CURRENT_MM",
                                                       .characteristic_cb = characteristic_height_current_mm_cb,
+                                                      .flags = BLE_GATT_CHR_F_READ
+                                                      // No handler for this one
+                                                     },
+                                                     {.type = COMMAND_TYPE_READ_ONLY_UINT64,
+                                                      .uuid = 0xFFFA,
+                                                      .name = "T0",
+                                                      .characteristic_cb = characteristic_t0_cb,
                                                       .flags = BLE_GATT_CHR_F_READ
                                                       // No handler for this one
                                                      }};
@@ -3848,6 +3892,13 @@ static const struct ble_gatt_svc_def g_ble_presents_to_the_moon_svcs[] = {
                 .arg = &g_context,
                 .flags = g_command_data_list[COMMAND_HEIGHT_CURRENT_MM].flags
             },
+            {
+                // "t0" characteristic
+                .uuid = BLE_UUID16_DECLARE(g_command_data_list[COMMAND_T0].uuid),
+                .access_cb = g_command_data_list[COMMAND_T0].characteristic_cb,
+                .arg = &g_context,
+                .flags = g_command_data_list[COMMAND_T0].flags
+            },
             {0}  // Terminator
         },
     },
@@ -3876,7 +3927,7 @@ static void command_cb(void *handle, void *arg)
             uint16_t uuid = g_command_data_list[command].uuid;
             command_type_t type = g_command_data_list[command].type;
             command_handler_t handler = g_command_data_list[command].handler;
-            uint32_t value = command_contents.value;
+            uint64_t value = command_contents.value;
 
             // Print some debug
             switch (type) {
@@ -3884,7 +3935,7 @@ static void command_cb(void *handle, void *arg)
                     ESP_LOGI(TAG, "command %s (0x%04x).", name, uuid);
                 break;
                 case COMMAND_TYPE_WRITE_ONLY_UINT32:
-                    ESP_LOGI(TAG, "command %s (0x%04x), write: %d.", name, uuid, value);
+                    ESP_LOGI(TAG, "command %s (0x%04x), write: %lld.", name, uuid, value);
                 break;
                 case COMMAND_TYPE_WRITE_ONLY_BOOLEAN:
                     ESP_LOGI(TAG, "command %s (0x%04x), write: %s.",
@@ -3901,13 +3952,13 @@ static void command_cb(void *handle, void *arg)
                 break;
                 case COMMAND_TYPE_READ_WRITE_UINT32:
                     if (command_contents.read_not_write) {
-                        ESP_LOGI(TAG, "command %s (0x%04x), read: %d.", name, uuid, value);
+                        ESP_LOGI(TAG, "command %s (0x%04x), read: %lld.", name, uuid, value);
                     } else {
-                        ESP_LOGI(TAG, "command %s (0x%04x), write: %d.", name, uuid, value);
+                        ESP_LOGI(TAG, "command %s (0x%04x), write: %lld.", name, uuid, value);
                     }
                 break;
-                case COMMAND_TYPE_READ_ONLY:
-                    ESP_LOGI(TAG, "command %s (0x%04x), read: %d.", name, uuid, value);
+                case COMMAND_TYPE_READ_ONLY_UINT32:
+                    ESP_LOGI(TAG, "command %s (0x%04x), read: %lld.", name, uuid, value);
                 break;
                 default:
                     ESP_LOGE(TAG, "unknown command type (%d)!", type);
