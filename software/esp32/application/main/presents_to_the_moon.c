@@ -2884,9 +2884,6 @@ static int queue_command(uint16_t conn_handle, uint16_t attr_handle,
 {
     int return_code = BLE_ATT_ERR_UNLIKELY;
 
-    ESP_LOGI(TAG, "ctxt->op %d, conn_handle 0x%04x, attr_handle %d.",
-             ctxt->op, conn_handle, attr_handle);
-
     switch (ctxt->op) {
         case BLE_GATT_ACCESS_OP_WRITE_CHR:
         {
