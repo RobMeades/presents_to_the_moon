@@ -26,6 +26,7 @@ import android.bluetooth.le.ScanResult
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -152,6 +153,9 @@ class MainActivity : ComponentActivity() {
     // Queue for sequential GATT reads
     private val readQueue = LinkedList<UUID>()
     private var isReading = false
+    private var activeReadUuid: UUID? = null
+    private var lastCompletedReadUuid: UUID? = null
+    private var lastCompletedReadAtMs: Long = 0L
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -279,6 +283,7 @@ class MainActivity : ComponentActivity() {
                 bluetoothGatt = null
                 readQueue.clear()
                 isReading = false
+                activeReadUuid = null
 
                 android.os.Handler(mainLooper).postDelayed({
                     startBleScan()
@@ -322,10 +327,21 @@ class MainActivity : ComponentActivity() {
             value: ByteArray,
             status: Int
         ) {
+            val uuid = characteristic.uuid
+            val nowMs = SystemClock.elapsedRealtime()
+
+            // Ignore a duplicate callback for the exact same UUID just completed
+            if (!isReading && uuid == lastCompletedReadUuid && (nowMs - lastCompletedReadAtMs) < 150L) {
+                return
+            }
+
             isReading = false
+            activeReadUuid = null
+            lastCompletedReadUuid = uuid
+            lastCompletedReadAtMs = nowMs
+
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 val longVal = parseLittleEndianLong(value)
-                val uuid = characteristic.uuid
 
                 when (uuid) {
                     CHAR_UUIDS["EMERGENCY_STOP_ENABLE"] -> emergencyStop.value = longVal.toInt() != 0
@@ -397,9 +413,11 @@ class MainActivity : ComponentActivity() {
 
         if (characteristic != null) {
             isReading = true
+            activeReadUuid = nextUuid
             val success = gatt.readCharacteristic(characteristic)
             if (!success) {
                 isReading = false
+                activeReadUuid = null
                 processNextRead()
             }
         } else {
@@ -421,6 +439,7 @@ class MainActivity : ComponentActivity() {
         val wasReadingOrQueued = isReading || readQueue.isNotEmpty()
         readQueue.clear()
         isReading = false
+        activeReadUuid = null
 
         if (wasReadingOrQueued) {
             android.os.Handler(mainLooper).postDelayed({
