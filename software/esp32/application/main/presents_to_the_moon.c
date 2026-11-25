@@ -98,6 +98,9 @@
 // How many seconds to wait for time synchronisation
 #define TIME_SYNC_WAIT_SECONDS 30
 
+// BLE command queue length: should be long enough for any opening burst to be queued
+#define COMMAND_QUEUE_LENGTH 50
+
 // The diameter of the winch in millimetres.
 #define WINCH_DIAMETER_MM 100
 
@@ -668,7 +671,7 @@ static bool display_information_cb(char *buffer, size_t buffer_size, void *user_
         midnight_tonight_tm.tm_isdst = -1;
         time_t midnight_tonight = mktime(&midnight_tonight_tm);
         char time_buffer[32];
-        strftime(time_buffer, sizeof(time_buffer), "%H.%M.%S", &t0_tm);
+        strftime(time_buffer, sizeof(time_buffer), "%H.%M", &t0_tm);
         snprintf(buffer, buffer_size, "next launch %sat %s",
                  t0 > midnight_tonight ? "tomorrow " : "", time_buffer);
         info = true;
@@ -1827,6 +1830,10 @@ static bool auto_timer_has_expired(launcher_t *launcher)
                 // have gone beyond the end of an activity period)
                 // Calculate the next launch time alignend with the hour
                 time_t next_time = auto_seconds_to_next_launch(midnight, now, this_launch_interval_seconds);
+                if (next_time == 0) {
+                    // We've been called twice in the same second, advance to the next period
+                    next_time = this_launch_interval_seconds;
+                }
                 timer_start_us(&launcher->timer_auto, next_time * 1000000);
                 t0 += next_time;
             } else {
@@ -1839,8 +1846,10 @@ static bool auto_timer_has_expired(launcher_t *launcher)
         }
 
         if (t0 == NO_COUNTDOWN) {
-            // Not in an active period at the moment: set the
-            // T0 to when the next one will start
+            // Not in an active period at the moment, clear
+            // out any existing pending countdown
+            __atomic_store_n(&launcher->pending_t0, NO_COUNTDOWN, __ATOMIC_RELAXED);
+            // Set the T0 to when the next one will start
             for (size_t x = 0; x < FGR_UTIL_ARRAY_LENGTH(start_time); x++) {
                 if (start_time[x] != NO_COUNTDOWN) {
                     if (start_time[x] < now) {
@@ -2874,6 +2883,9 @@ static int queue_command(uint16_t conn_handle, uint16_t attr_handle,
                          command_contents_t *command_contents)
 {
     int return_code = BLE_ATT_ERR_UNLIKELY;
+
+    ESP_LOGI(TAG, "ctxt->op %d, conn_handle 0x%04x, attr_handle %d.",
+             ctxt->op, conn_handle, attr_handle);
 
     switch (ctxt->op) {
         case BLE_GATT_ACCESS_OP_WRITE_CHR:
@@ -4336,20 +4348,20 @@ static int32_t init(context_t *context)
                     context->display_source_clock = display_source_add(context->display,
                                                                        display_clock_cb,
                                                                        context, DISPLAY_CLOCK_PRIORITY,
-                                                                       500, "clock");
+                                                                       250, "clock");
                     if (context->display_source_clock) {
                         // Add the countdown callback (may not be active yet)
                         context->display_source_countdown = display_source_add(context->display,
                                                                                display_countdown_cb,
                                                                                context, DISPLAY_COUNTDOWN_PRIORITY,
-                                                                               500, "countdown");
+                                                                               250, "countdown");
                         if (context->display_source_countdown) {
                             // Add an information display callback: long refresh time since it
                             // does not update often
                             context->display_source_information = display_source_add(context->display,
                                                                                      display_information_cb,
                                                                                      context, DISPLAY_INFORMATION_PRIORITY,
-                                                                                     60000, "info");
+                                                                                     10000, "info");
                             if (context->display_source_information) {
                                 err = ESP_OK;
                             }
@@ -4370,9 +4382,9 @@ static int32_t init(context_t *context)
             err = -ESP_ERR_NO_MEM;
             // RTOS stuff needed for launcher operation
             launcher_t *launcher = &context->launcher;
-            launcher->queue_state = xQueueCreate(10, sizeof(launcher_state_t));
+            launcher->queue_state = xQueueCreate(COMMAND_QUEUE_LENGTH, sizeof(launcher_state_t));
             if (launcher->queue_state) {
-                err = fgr_task_create(&launcher_cb, context, "launcher", 4096, 3, &launcher->task_state);
+                err = fgr_task_create(&launcher_cb, context, "launcher", 4096, 4, &launcher->task_state);
                 if (err != ESP_OK) {
                     ESP_LOGE(TAG, "unable to create launcher task (%s)!", esp_err_to_name(-err));
                 }
@@ -4384,7 +4396,7 @@ static int32_t init(context_t *context)
         if (err == ESP_OK) {
             err = -ESP_ERR_NO_MEM;
             // RTOS stuff needed for command handling
-            context->command_queue = xQueueCreate(10, sizeof(command_contents_t));
+            context->command_queue = xQueueCreate(COMMAND_QUEUE_LENGTH, sizeof(command_contents_t));
             if (context->command_queue) {
                 err = fgr_task_create(&command_cb, context, "command", 4096, 3, &context->command_task);
                 if (err != ESP_OK) {

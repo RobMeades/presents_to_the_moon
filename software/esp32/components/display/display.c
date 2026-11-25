@@ -44,9 +44,11 @@
 // Logging prefix
 #define TAG "display"
 
-// Manager task parameters.
+// Manager task stack.
 #define DISPLAY_TASK_STACK_BYTES 4096
-#define DISPLAY_TASK_PRIORITY    5
+
+// Display priority (low).
+#define DISPLAY_TASK_PRIORITY    2
 
 /* ----------------------------------------------------------------
  * TYPES
