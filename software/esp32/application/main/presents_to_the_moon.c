@@ -1811,6 +1811,9 @@ static bool auto_timer_has_expired(launcher_t *launcher)
             if (launcher->auto_period_override_seconds > 0) {
                 // We failed to launch previously and are retrying after a short interval
                 timer_start_us(&launcher->timer_auto, launcher->auto_period_override_seconds * 1000000);
+                t0 += launcher->auto_period_override_seconds;
+                // Update T0 directly for a retry
+                __atomic_store_n(&launcher->t0, t0, __ATOMIC_RELAXED);
                 launcher->auto_period_override_seconds = 0;
             } else {
                 // Normal case
@@ -1820,6 +1823,7 @@ static bool auto_timer_has_expired(launcher_t *launcher)
                     time_t next_time = auto_seconds_to_next_launch(midnight, now, this_launch_interval_seconds);
                     timer_start_us(&launcher->timer_auto, next_time * 1000000);
                     // Update T0 directly as the state machine will not be running yet
+                    t0 += next_time;
                     __atomic_store_n(&launcher->t0, t0, __ATOMIC_RELAXED);
                 }
             }
