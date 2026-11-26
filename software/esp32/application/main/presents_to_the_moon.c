@@ -638,6 +638,8 @@ static bool display_countdown_cb(char *buffer, size_t buffer_size, void *user_da
 
     time_t t0 = __atomic_load_n(&launcher->t0, __ATOMIC_RELAXED);
     launcher_state_t state = __atomic_load_n(&launcher->state, __ATOMIC_RELAXED);
+    // Only display countdown if the height has been calibrated (we won't launch without
+    // calibration)
     if ((t0 != NO_COUNTDOWN) && (state != LAUNCHER_STATE_POSITION_UNKNOWN)) {
         time_t now;
         time(&now);
@@ -660,9 +662,11 @@ static bool display_information_cb(char *buffer, size_t buffer_size, void *user_
     launcher_state_t state = __atomic_load_n(&launcher->state, __ATOMIC_RELAXED);
     time_t now;
     time(&now);
-    if ((t0 != NO_COUNTDOWN) && (state != LAUNCHER_STATE_POSITION_UNKNOWN) &&
+    if ((t0 != NO_COUNTDOWN) && (state == LAUNCHER_STATE_READY) &&
         (t0 - now > COUNTDOWN_INFORMATION_THRESHOLD_SECONDS)) {
-        // If T0 is a long way away, put up an explanatory message instead of the countdown
+        // If T0 is a long way away, put up an explanatory message instead of the countdown,
+        // and only do this in ready state so as not to overwrite a manual launch that
+        // may be running
         struct tm t0_tm;
         localtime_r(&t0, &t0_tm);
         struct tm midnight_tonight_tm;
@@ -1799,7 +1803,7 @@ static bool auto_timer_has_expired(launcher_t *launcher)
         }
         if (nvs_shadow->peak_enabled) {
             start_time[1] = nvs_shadow->peak_start_seconds_since_midnight + midnight;
-            launch_interval_seconds[1] = nvs_shadow->off_peak_launch_interval_seconds;
+            launch_interval_seconds[1] = nvs_shadow->peak_launch_interval_seconds;
             if (auto_is_active(possible_t0_seconds_since_midnight,
                                nvs_shadow->peak_start_seconds_since_midnight,
                                nvs_shadow->peak_duration_seconds)) {
@@ -1852,9 +1856,9 @@ static bool auto_timer_has_expired(launcher_t *launcher)
             launcher->timer_auto.duration_us = 0;
         }
 
-        if (t0 == NO_COUNTDOWN) {
-            // Not in an active period at the moment, clear
-            // out any existing pending countdown
+        if ((t0 == NO_COUNTDOWN) && (launcher->state == LAUNCHER_STATE_READY)) {
+            // Not in an active period at the moment and no manual launch is running,
+            // clear out any existing pending countdown
             __atomic_store_n(&launcher->pending_t0, NO_COUNTDOWN, __ATOMIC_RELAXED);
             // Set the T0 to when the next one will start
             for (size_t x = 0; x < FGR_UTIL_ARRAY_LENGTH(start_time); x++) {
@@ -2019,13 +2023,10 @@ static launcher_state_t advance_state_commanded_run(launcher_t *launcher,
 
     if (height_mm < height_max_mm) {
         // If there was no countdown, set one now
-        time_t t0 = __atomic_load_n(&launcher->t0, __ATOMIC_RELAXED);
-        if (t0 == NO_COUNTDOWN) {
-            time_t t0_seconds;
-            time(&t0_seconds);
-            t0_seconds += t0_offset(launcher);
-            __atomic_store_n(&launcher->t0, t0_seconds, __ATOMIC_RELAXED);
-        }
+        time_t t0_seconds;
+        time(&t0_seconds);
+        t0_seconds += t0_offset(launcher);
+        __atomic_store_n(&launcher->t0, t0_seconds, __ATOMIC_RELAXED);
         // Set up the deluge audio for a duration
         uint32_t track_number = nvs_shadow->track_number_deluge;
         int64_t duration_us = 0;
@@ -4365,7 +4366,7 @@ static int32_t init(context_t *context)
                             context->display_source_information = display_source_add(context->display,
                                                                                      display_information_cb,
                                                                                      context, DISPLAY_INFORMATION_PRIORITY,
-                                                                                     10000, "info");
+                                                                                     1000, "info");
                             if (context->display_source_information) {
                                 err = ESP_OK;
                             }
