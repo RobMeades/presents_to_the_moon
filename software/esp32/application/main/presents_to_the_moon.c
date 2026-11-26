@@ -637,7 +637,8 @@ static bool display_countdown_cb(char *buffer, size_t buffer_size, void *user_da
     launcher_t *launcher = &context->launcher;
 
     time_t t0 = __atomic_load_n(&launcher->t0, __ATOMIC_RELAXED);
-    if (t0 != NO_COUNTDOWN) {
+    launcher_state_t state = __atomic_load_n(&launcher->state, __ATOMIC_RELAXED);
+    if ((t0 != NO_COUNTDOWN) && (state != LAUNCHER_STATE_POSITION_UNKNOWN)) {
         time_t now;
         time(&now);
         if (format_duration(now - t0, buffer, buffer_size) != NULL) {
@@ -656,9 +657,11 @@ static bool display_information_cb(char *buffer, size_t buffer_size, void *user_
     launcher_t *launcher = &context->launcher;
 
     time_t t0 = __atomic_load_n(&launcher->t0, __ATOMIC_RELAXED);
+    launcher_state_t state = __atomic_load_n(&launcher->state, __ATOMIC_RELAXED);
     time_t now;
     time(&now);
-    if ((t0 != NO_COUNTDOWN) && (t0 - now > COUNTDOWN_INFORMATION_THRESHOLD_SECONDS)) {
+    if ((t0 != NO_COUNTDOWN) && (state != LAUNCHER_STATE_POSITION_UNKNOWN) &&
+        (t0 - now > COUNTDOWN_INFORMATION_THRESHOLD_SECONDS)) {
         // If T0 is a long way away, put up an explanatory message instead of the countdown
         struct tm t0_tm;
         localtime_r(&t0, &t0_tm);
